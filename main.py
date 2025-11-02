@@ -8,6 +8,7 @@ import torch
 print(torch.cuda.is_available())
 from dataloader.data_loader import *
 from policy.policy import *
+from policy.trajectory_transformer import TrajectoryTransformerActorCriticPolicy
 # from trainer.trainer import *
 from stable_baselines3 import PPO
 from trainer.irl_trainer import *
@@ -61,6 +62,22 @@ def train_predict(args, predict_dt):
             model = PPO.load(args.resume_model_path, env=env_init, device=args.device)
         else:
             model = PPO(policy=HGATActorCriticPolicy,
+                        env=env_init,
+                        policy_kwargs=policy_kwargs,
+                        **PPO_PARAMS,
+                        seed=args.seed,
+                        device=args.device)
+    elif args.policy == 'TT' or args.policy == 'TRAJ':
+        # Trajectory Transformer wrapper policy (simple MLP extractor inside)
+        policy_kwargs = dict(
+            last_layer_dim_pi=args.num_stocks,
+            last_layer_dim_vf=args.num_stocks,
+        )
+        if getattr(args, 'resume_model_path', None) and os.path.exists(args.resume_model_path):
+            print(f"Loading PPO model from {args.resume_model_path}")
+            model = PPO.load(args.resume_model_path, env=env_init, device=args.device)
+        else:
+            model = PPO(policy=TrajectoryTransformerActorCriticPolicy,
                         env=env_init,
                         policy_kwargs=policy_kwargs,
                         **PPO_PARAMS,
