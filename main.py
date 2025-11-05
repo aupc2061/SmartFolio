@@ -8,7 +8,7 @@ import torch
 print(torch.cuda.is_available())
 from dataloader.data_loader import *
 from policy.policy import *
-from policy.trajectory_transformer import TrajectoryTransformerActorCriticPolicy
+from policy.trajectory_transformer import TrajectoryTransformerActorCriticPolicy, TrajectoryTransformerAdapter
 # from trainer.trainer import *
 from stable_baselines3 import PPO
 from trainer.irl_trainer import *
@@ -18,19 +18,66 @@ from stable_baselines3 import TD3
 
 PATH_DATA = f'./dataset/'
 
-class TT_TD3Policy(TD3Policy, TrajectoryTransformerActorCriticPolicy):
+class TT_TD3Policy(TD3Policy):
     """
-    It inherits TD3Policy (required network layout for TD3) and the TT ActorCritic policy
+    TD3-compatible policy that can use a TrajectoryTransformer adapter.
+    Fully compatible with SB3 (no squash_output / device assignment issues).
     """
+
     def __init__(self, observation_space, action_space, lr_schedule, *args, **kwargs):
-        super(TT_TD3Policy, self).__init__(observation_space, action_space, lr_schedule, *args, **kwargs)
+        # Drop unsupported kwargs from PPO-style configs
+        for key in ["last_layer_dim_pi", "last_layer_dim_vf", "n_head", "hidden_dim", "no_ind", "no_neg"]:
+            kwargs.pop(key, None)
+
+        # Initialize these BEFORE calling super().__init__
+        self.adapter = None
+        self.adapter_device = None
         self.ortho_init = False
+        
+        super().__init__(observation_space, action_space, lr_schedule, *args, **kwargs)
 
-    def _build_mlp_extractor(self) -> None:
-        TrajectoryTransformerActorCriticPolicy._build_mlp_extractor(self)
+    def set_adapter(self, adapter):
+        """Attach a TrajectoryTransformerAdapter."""
+        self.adapter = adapter
+        self.adapter_device = adapter.device
+        print(f"[TT_TD3Policy] Attached transformer adapter on {self.adapter_device}")
 
-    def set_adapter(self, adapter) -> None:
-        return TrajectoryTransformerActorCriticPolicy.set_adapter(self, adapter)
+        emb_dim = getattr(adapter.model.config, "n_embd", 128)
+        
+        # Use net_arch to get features_dim, or fallback to a default
+        features_dim = getattr(self, 'features_dim', 256)
+        
+        self.extractor = nn.Sequential(
+            nn.Linear(emb_dim, features_dim),
+            nn.ReLU(),
+        ).to(self.adapter_device)
+
+    def extract_features(self, obs: torch.Tensor) -> torch.Tensor:
+        """Use transformer embeddings as features if adapter is attached."""
+        if self.adapter is None:
+            return super().extract_features(obs)
+
+        device = self.adapter_device or next(self.parameters()).device
+        self.adapter.model.eval()
+        with torch.no_grad():
+            obs_np = obs.detach().cpu().numpy() if isinstance(obs, torch.Tensor) else obs
+            seqs = [self.adapter._make_token_sequence(x, [0] * self.adapter.action_dim) for x in obs_np]
+            tokens = torch.tensor(seqs, dtype=torch.long, device=device)
+            outputs = self.adapter.model(tokens, return_dict=True)
+            emb = outputs.last_hidden_state[:, -1, :]
+        
+        # Move embeddings to the correct device for the extractor
+        return self.extractor(emb.to(next(self.extractor.parameters()).device))
+
+    def forward(self, obs, deterministic: bool = False):
+        """TD3 forward pass using transformer extractor if available."""
+        features = self.extract_features(obs)
+        mean_actions = self.actor(features)
+        if deterministic:
+            return mean_actions
+        noise = torch.normal(0, self.actor.noise_std, size=mean_actions.shape).to(mean_actions.device)
+        return torch.tanh(mean_actions + noise)
+
 
 def train_predict(args, predict_dt):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
@@ -65,7 +112,7 @@ def train_predict(args, predict_dt):
                         device=args.device)
     elif args.policy == 'HGAT':
         policy_kwargs = dict(
-            last_layer_dim_pi=args.num_stocks,  # Should equal num_stocks for proper initialization
+            last_layer_dim_pi=args.num_stocks,
             last_layer_dim_vf=args.num_stocks,
             n_head=8,
             hidden_dim=128,
@@ -83,7 +130,9 @@ def train_predict(args, predict_dt):
                         seed=args.seed,
                         device=args.device)
     elif args.policy == 'TT' or args.policy == 'TRAJ':
-        TD3_PARAMS = dict(buffer_size=100000, learning_rate=1e-3, batch_size=256, tau=0.005, gamma=0.99, train_freq=1, gradient_steps=1)
+        # Use TD3 but attach transformer adapter
+        TD3_PARAMS = dict(buffer_size=100000, learning_rate=1e-3, batch_size=256,
+                          tau=0.005, gamma=0.99, train_freq=1, gradient_steps=1)
         policy_kwargs = dict(
             last_layer_dim_pi=args.num_stocks,
             last_layer_dim_vf=args.num_stocks,
@@ -93,12 +142,31 @@ def train_predict(args, predict_dt):
             model = PPO.load(args.resume_model_path, env=env_init, device=args.device)
         else:
             model = TD3(policy=TT_TD3Policy,
-                env=env_init,
-                policy_kwargs=policy_kwargs,
-                seed=args.seed,
-                verbose=1,
-                device=args.device,
-                **TD3_PARAMS)
+                        env=env_init,
+                        policy_kwargs=policy_kwargs,
+                        seed=args.seed,
+                        verbose=1,
+                        device=args.device,
+                        **TD3_PARAMS)
+
+        # Attach trajectory transformer adapter
+        try:
+            adapter = TrajectoryTransformerAdapter(
+                vocab_size=128,
+                action_dim=args.num_stocks,
+                observation_dim=args.input_dim,
+                block_size=256,
+                n_layer=4,
+                n_head=4,
+                n_embd=128,
+                device=args.device if isinstance(args.device, str)
+                       else ("cuda" if torch.cuda.is_available() else "cpu"),
+            )
+            model.policy.set_adapter(adapter)
+            print("Attached TrajectoryTransformerAdapter to TD3 policy")
+        except Exception as e:
+            print(f"Warning: failed to attach transformer adapter to TD3 policy: {e}")
+
     train_model_and_predict(model, args, train_loader, val_loader, test_loader)
 
 
@@ -113,19 +181,17 @@ if __name__ == '__main__':
     parser.add_argument("-pos_yn", "-pos", default="y", help="是否加入动量关系图")
     parser.add_argument("-neg_yn", "-neg", default="y", help="是否加入反转关系图")
     parser.add_argument("-multi_reward_yn", "-mr", default="y", help="是否加入多奖励学习")
-    parser.add_argument("-policy", "-p", default="MLP", help="策略网络")
-    # continual learning / resume
-    parser.add_argument("--resume_model_path", default=None, help="Path to previously saved PPO model to resume from")
-    parser.add_argument("--reward_net_path", default=None, help="Path to saved IRL reward network state_dict to resume from")
-    parser.add_argument("--fine_tune_steps", type=int, default=5000, help="Timesteps for monthly fine-tuning when resuming")
-    parser.add_argument("--save_dir", default="./checkpoints", help="Directory to save trained models")
-    # Training hyperparameters
-    parser.add_argument("--irl_epochs", type=int, default=50, help="Number of IRL training epochs")
-    parser.add_argument("--rl_timesteps", type=int, default=10000, help="Number of RL timesteps for training")
-    parser.add_argument("--ga_generations", type=int, default=30, help="Number of GA generations for expert generation")
+    parser.add_argument("-policy", "-p", default="TT", help="策略网络")
+    parser.add_argument("--resume_model_path", default=None)
+    parser.add_argument("--reward_net_path", default=None)
+    parser.add_argument("--fine_tune_steps", type=int, default=5000)
+    parser.add_argument("--save_dir", default="./checkpoints")
+    parser.add_argument("--irl_epochs", type=int, default=50)
+    parser.add_argument("--rl_timesteps", type=int, default=10000)
+    parser.add_argument("--ga_generations", type=int, default=30)
     args = parser.parse_args()
 
-    # debug 用参数设置
+    # Default run setup
     args.model_name = 'SmartFolio'
     args.market = 'hs300'
     args.relation_type = 'hy'
@@ -144,12 +210,7 @@ if __name__ == '__main__':
     args.pos_yn = True
     args.neg_yn = True
     args.multi_reward = True
-    args.use_ga_expert = True  # Use GA for expert generation (set False for original heuristic)
-    # Training hyperparameters (can be overridden via command line)
-    args.irl_epochs = getattr(args, 'irl_epochs', 50)
-    args.rl_timesteps = getattr(args, 'rl_timesteps', 10000)
-    args.ga_generations = getattr(args, 'ga_generations', 30)
-    # ensure save dir
+    args.use_ga_expert = True
     os.makedirs(args.save_dir, exist_ok=True)
 
     if args.market == 'hs300':
@@ -161,7 +222,6 @@ if __name__ == '__main__':
     elif args.market == 'sp500':
         args.num_stocks = 472
     elif args.market == 'custom':
-        # Auto-detect num_stocks from a sample pickle file
         data_dir = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
         sample_files = [f for f in os.listdir(data_dir) if f.endswith('.pkl')]
         if sample_files:
@@ -170,39 +230,9 @@ if __name__ == '__main__':
             with open(sample_path, 'rb') as f:
                 sample_data = pickle.load(f)
             args.num_stocks = sample_data['features'].shape[1]
-            print(f"Auto-detected num_stocks for custom market: {args.num_stocks}")
+            print(f"Auto-detected num_stocks: {args.num_stocks}")
         else:
-            raise ValueError(f"No pickle files found in {data_dir} to determine num_stocks")
-    else:
-        # Generic fallback for unknown markets
-        data_dir = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
-        if os.path.exists(data_dir):
-            import pickle
-            sample_files = [f for f in os.listdir(data_dir) if f.endswith('.pkl')]
-            if sample_files:
-                sample_path = os.path.join(data_dir, sample_files[0])
-                with open(sample_path, 'rb') as f:
-                    sample_data = pickle.load(f)
-                args.num_stocks = sample_data['features'].shape[1]
-                print(f"Auto-detected num_stocks for {args.market} market: {args.num_stocks}")
-            else:
-                raise ValueError(f"No pickle files found in {data_dir} to determine num_stocks")
-        else:
-            raise ValueError(f"Unknown market {args.market} and data directory {data_dir} does not exist")
+            raise ValueError(f"No pickle files found in {data_dir}")
 
     trained_model = train_predict(args, predict_dt='2025-02-05')
-    # save PPO model checkpoint
-    try:
-        ts = time.strftime('%Y%m%d_%H%M%S')
-        out_path = os.path.join(args.save_dir, f"ppo_{args.policy.lower()}_{args.market}_{ts}")
-        # train_predict currently returns None; saving env-attached model is handled inside trainer
-        # If we had a handle, we could save here. Keep path ready for future.
-        print(f"Training run complete. To save PPO model, call model.save('{out_path}') where model is your PPO instance.")
-    except Exception as e:
-        print(f"Skip saving PPO model here: {e}")
-
-    print(1)
-
-
-
-
+    print("Training complete.")
