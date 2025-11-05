@@ -1,4 +1,3 @@
-
 import math
 import numpy as np
 import torch
@@ -176,6 +175,12 @@ class TrajectoryTransformerAdapter:
         self.observation_dim = observation_dim
         self.block_size = max(block_size, observation_dim + action_dim + 1)
         self.seq_length = self.block_size
+        
+        # CRITICAL FIX: Initialize normalization attributes with default values
+        # These will be updated when _discretize_dataset is called
+        self.obs_min = np.zeros(self.observation_dim)
+        self.obs_max = np.ones(self.observation_dim)
+        self.obs_ranges = np.ones(self.observation_dim)
 
         if model_name:
             self.model = TrajectoryTransformerModel.from_pretrained(model_name)
@@ -197,6 +202,38 @@ class TrajectoryTransformerAdapter:
         self.model.to(self.device)
         self.model.train()
 
+    def set_normalization_from_dataset(self, dataset):
+        """
+        Compute normalization bounds from a dataset before using the adapter.
+        This should be called before fine-tuning or using the adapter for inference.
+        """
+        obs_list = []
+        for data in dataset:
+            if hasattr(data, 'x'):
+                # Graph data
+                obs = data.x.cpu().numpy()
+            elif isinstance(data, dict) and 'features' in data:
+                # Dictionary data
+                obs = data['features']
+            else:
+                continue
+            
+            # Flatten and pad/truncate to observation_dim
+            obs = np.asarray(obs).flatten()
+            padded_obs = np.zeros(self.observation_dim)
+            padded_obs[:min(len(obs), self.observation_dim)] = obs[:self.observation_dim]
+            obs_list.append(padded_obs)
+        
+        if obs_list:
+            obs_arr = np.stack(obs_list)
+            self.obs_min = obs_arr.min(axis=0)
+            self.obs_max = obs_arr.max(axis=0)
+            self.obs_ranges = self.obs_max - self.obs_min
+            self.obs_ranges[self.obs_ranges == 0] = 1.0
+            print(f"[TrajectoryTransformerAdapter] Set normalization bounds from {len(obs_list)} samples")
+            print(f"  obs_min range: [{self.obs_min.min():.4f}, {self.obs_min.max():.4f}]")
+            print(f"  obs_max range: [{self.obs_max.min():.4f}, {self.obs_max.max():.4f}]")
+
     def _discretize_dataset(self, expert_trajectories):
         obs_list, act_list = [], []
         for state, action in expert_trajectories:
@@ -217,10 +254,21 @@ class TrajectoryTransformerAdapter:
         return obs_arr, np.array(act_list, dtype=int)
 
     def _make_token_sequence(self, obs: np.ndarray, act_idxs: List[int]) -> np.ndarray:
-        scaled = (obs - self.obs_min) / self.obs_ranges
+        # Ensure obs is the right size
+        obs = np.asarray(obs).flatten()
+        obs_padded = np.zeros(self.observation_dim)
+        obs_padded[:min(len(obs), self.observation_dim)] = obs[:self.observation_dim]
+        
+        # Normalize
+        scaled = (obs_padded - self.obs_min) / self.obs_ranges
+        scaled = np.clip(scaled, 0, 1)  # Safety clip
+        
+        # Tokenize
         tokens_obs = np.floor(scaled * (self.vocab_size - 1)).astype(int)
         tokens_act = np.array([int(x) % self.vocab_size for x in act_idxs], dtype=int)
         seq = np.concatenate([tokens_obs, tokens_act, np.array([1], dtype=int)])
+        
+        # Pad or truncate
         if len(seq) < self.seq_length:
             seq = np.concatenate([seq, np.zeros(self.seq_length - len(seq), dtype=int)])
         else:

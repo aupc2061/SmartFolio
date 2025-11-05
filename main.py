@@ -132,14 +132,14 @@ def train_predict(args, predict_dt):
     elif args.policy == 'TT' or args.policy == 'TRAJ':
         # Use TD3 but attach transformer adapter
         TD3_PARAMS = dict(buffer_size=100000, learning_rate=1e-3, batch_size=256,
-                          tau=0.005, gamma=0.99, train_freq=1, gradient_steps=1)
+                        tau=0.005, gamma=0.99, train_freq=1, gradient_steps=1)
         policy_kwargs = dict(
             last_layer_dim_pi=args.num_stocks,
             last_layer_dim_vf=args.num_stocks,
         )
         if getattr(args, 'resume_model_path', None) and os.path.exists(args.resume_model_path):
-            print(f"Loading PPO model from {args.resume_model_path}")
-            model = PPO.load(args.resume_model_path, env=env_init, device=args.device)
+            print(f"Loading TD3 model from {args.resume_model_path}")
+            model = TD3.load(args.resume_model_path, env=env_init, device=args.device)
         else:
             model = TD3(policy=TT_TD3Policy,
                         env=env_init,
@@ -154,16 +154,64 @@ def train_predict(args, predict_dt):
             adapter = TrajectoryTransformerAdapter(
                 vocab_size=128,
                 action_dim=args.num_stocks,
-                observation_dim=args.input_dim,
+                observation_dim=args.input_dim * args.num_stocks,  # Flattened observation
                 block_size=256,
                 n_layer=4,
                 n_head=4,
                 n_embd=128,
                 device=args.device if isinstance(args.device, str)
-                       else ("cuda" if torch.cuda.is_available() else "cpu"),
+                    else ("cuda" if torch.cuda.is_available() else "cpu"),
             )
+            print("Computing normalization bounds from training dataset...")
+            adapter.set_normalization_from_dataset(train_dataset)
+            
             model.policy.set_adapter(adapter)
             print("Attached TrajectoryTransformerAdapter to TD3 policy")
+            from gen_data.generate_expert_black import generate_hybrid_expert_trajectories
+            from torch.utils.data import DataLoader as Load, TensorDataset
+            print("\n==============================")
+            print("Fine-tuning Trajectory Transformer Adapter...")
+            print("==============================")
+
+            expert_trajectories = generate_hybrid_expert_trajectories(
+                args,
+                train_dataset,
+                num_trajectories=100
+            )
+            states = torch.tensor([t[0] for t in expert_trajectories], dtype=torch.float32).to(args.device)
+            actions = torch.tensor([t[1] for t in expert_trajectories], dtype=torch.float32).to(args.device)
+            dataset = TensorDataset(states, actions)
+            loader = Load(dataset, batch_size=64, shuffle=True)
+
+            adapter.model.train()
+            optimizer = torch.optim.Adam(adapter.model.parameters(), lr=1e-5)
+            loss_fn = torch.nn.MSELoss()
+
+            for step in range(args.fine_tune_steps):
+                total_loss = 0.0
+                for s, a in loader:
+                    if len(s.shape) > 2:
+                        s = s.reshape(s.shape[0], -1)
+                    
+                    seqs = [adapter._make_token_sequence(si.cpu().numpy(), ai.cpu().numpy()) 
+                            for si, ai in zip(s, a)]
+                    tokens = torch.tensor(seqs, dtype=torch.long, device=args.device)
+                    outputs = adapter.model(tokens, return_dict=True)
+                    preds = outputs.logits[:, -1, :a.shape[1]]
+                    loss = loss_fn(preds, a)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    total_loss += loss.item()
+                if (step + 1) % 500 == 0:
+                    avg_loss = total_loss / len(loader)
+                    print(f"[Fine-tune] Step {step+1}/{args.fine_tune_steps}, Loss: {avg_loss:.6f}")
+            
+            os.makedirs(args.save_dir, exist_ok=True)
+            ft_path = os.path.join(args.save_dir, "transformer_finetuned.pt")
+            torch.save(adapter.model.state_dict(), ft_path)
+            print(f"Saved fine-tuned transformer to {ft_path}\n")
+
         except Exception as e:
             print(f"Warning: failed to attach transformer adapter to TD3 policy: {e}")
 
