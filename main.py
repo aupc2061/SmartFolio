@@ -193,7 +193,7 @@ def train_predict(args, predict_dt):
             optimizer = torch.optim.AdamW(adapter.model.parameters(), lr=5e-5, weight_decay=1e-4)
             loss_fn = torch.nn.MSELoss()
 
-            fine_tune_steps = min(args.fine_tune_steps, 30)  # control epochs here
+            fine_tune_steps = min(args.fine_tune_steps, 2)  # control epochs here
             grad_accum = 2  # gradient accumulation
 
             # --- Step 4: Fine-tuning loop (FP32 only) ---
@@ -227,7 +227,7 @@ def train_predict(args, predict_dt):
                 avg_loss = total_loss / len(loader)
                 outer_bar.set_postfix({"AvgLoss": f"{avg_loss:.4f}"})
 
-            print("✅ Fine-tuning completed successfully (FP32 mode).")
+            print(" Fine-tuning completed successfully (FP32 mode).")
 
             # --- Step 5: Save the model ---
             os.makedirs(args.save_dir, exist_ok=True)
