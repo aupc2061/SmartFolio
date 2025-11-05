@@ -56,25 +56,40 @@ class MaxEntIRL:
     def _sample_trajectories(self, env, model, batch_size, device):
         trajectories = []
         obs = env.reset()
-        # obs is now 1D flattened: [num_envs, obs_len]
-        # For DummyVecEnv, obs shape is [1, obs_len]
-        
-        # Determine num_stocks from action space
-        num_stocks = env.action_space.nvec[0]  # First dimension of MultiDiscrete action space
-        
+
+        # Detect action space type (old MultiDiscrete vs new Box)
+        if hasattr(env.action_space, "nvec"):        # old MultiDiscrete
+            num_stocks = env.action_space.nvec[0]
+            discrete_actions = True
+        else:                                        # new continuous Box
+            num_stocks = env.action_space.shape[0]
+            discrete_actions = False
+
         for _ in range(batch_size):
             action, _ = model.predict(obs)
             next_obs, reward, done, _ = env.step(action)
 
-            # 转换为 Multi-Hot 编码
-            action_multi_hot = np.zeros(num_stocks)
-            for i in range(action.shape[1]):
-                action_multi_hot[action[:, i]] = 1
+            if discrete_actions:
+                # ---- Old MultiDiscrete path ----
+                action_multi_hot = np.zeros(num_stocks, dtype=np.float32)
+                for i in range(action.shape[0]):
+                    idx = int(action[i])
+                    action_multi_hot[idx] = 1.0
+            else:
+                # ---- New continuous Box path ----
+                # action is continuous weights, possibly unnormalized
+                a = np.clip(np.array(action, dtype=np.float32), 0.0, 1.0)
+                s = a.sum()
+                if s <= 0:
+                    action_multi_hot = np.ones(num_stocks, dtype=np.float32) / float(num_stocks)
+                else:
+                    action_multi_hot = a / s  # normalize so allocations sum to 1
 
             trajectories.append((obs.copy(), action_multi_hot))
             obs = next_obs
             if done:
                 obs = env.reset()
+
         return trajectories
 
     def _calculate_rewards(self, trajectories, device):

@@ -44,7 +44,10 @@ class StockPortfolioEnv(gym.Env):
         # 允许选择固定数量的股票（如 10%）
         self.top_k = max(1, int(0.1 * self.num_stocks))  # 每次选择的股票数
         # 动作空间：离散，表示选择的股票索引
-        self.action_space = spaces.MultiDiscrete([self.num_stocks] * self.top_k)
+        self.action_space = spaces.Box(low=0.0,
+                               high=1.0,
+                               shape=(self.num_stocks,),
+                               dtype=np.float32)
 
         # 部分可观测
         # 观测空间：股票特征及各个关系图
@@ -143,33 +146,36 @@ class StockPortfolioEnv(gym.Env):
             # load s'
             self.current_step += 1
             self.load_observation(ind_yn=self.ind_yn, pos_yn=self.pos_yn, neg_yn=self.neg_yn)
-            # MultiDiscrete 下，根据 actions 进行选股
-            selected_indices = list(set(actions))  # 去重
-            if self.mode == "test":
-                print(self.current_step)
-                print(selected_indices)
-            weights = np.zeros(self.num_stocks)
-            weights[selected_indices] = 1.0 / len(selected_indices)  # 选中的股票等权分配
 
-            # 使用IRL奖励函数替代原始奖励计算
+            # ---- NEW: continuous actions normalized to sum to 1 ----
+            # actions may be a numpy array, list, or tensor. Ensure numpy array.
+            if isinstance(actions, np.ndarray):
+                a = actions.astype(np.float32)
+            else:
+                a = np.array(actions, dtype=np.float32)
+
+            # clip to [0,1] to be robust
+            a = np.clip(a, 0.0, 1.0)
+
+            s = a.sum()
+            if s <= 0:
+                # if all zeros, fallback to uniform allocation
+                weights = np.ones(self.num_stocks, dtype=np.float32) / float(self.num_stocks)
+            else:
+                weights = a / s  # normalized allocation vector summing to 1
+
+            # Use IRL reward if available, else dot(weights, returns)
             if self.reward_net is not None:
-                # self.observation is already flattened [obs_len]
-                state_tensor = torch.FloatTensor(self.observation).to(self.device)  # 当前状态
-                # 将动作（权重向量）转换为 multi-hot 编码，输入奖励函数进行计算
-                action_multi_hot = np.zeros(self.num_stocks)
-                action_multi_hot[selected_indices] = 1
-                action_tensor = torch.FloatTensor(action_multi_hot).to(self.device)  # 动作（权重向量）
-                
-                # Pass wealth information for drawdown calculation
+                state_tensor = torch.FloatTensor(self.observation).to(self.device)
+                action_tensor = torch.FloatTensor(weights).to(self.device)  # now a continuous weight vector
                 wealth_info = torch.FloatTensor([self.net_value, self.peak_value]).to(self.device)
-                
                 with torch.no_grad():
                     self.reward = self.reward_net(state_tensor, action_tensor, wealth_info).mean().cpu().item()
             else:
-                self.reward = np.dot(weights, np.array(self.ror))
-
+                self.reward = float(np.dot(weights, np.array(self.ror)))
+            
             self.net_value *= (1 + self.reward)
-            self.peak_value = max(self.peak_value, self.net_value)  # Update peak value
+            self.peak_value = max(self.peak_value, self.net_value)
             self.daily_return_s.append(self.reward)
             self.net_value_s.append(self.net_value)
 

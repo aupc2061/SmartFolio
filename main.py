@@ -13,8 +13,24 @@ from policy.trajectory_transformer import TrajectoryTransformerActorCriticPolicy
 from stable_baselines3 import PPO
 from trainer.irl_trainer import *
 from torch_geometric.loader import DataLoader
+from stable_baselines3.td3.policies import TD3Policy
+from stable_baselines3 import TD3
 
 PATH_DATA = f'./dataset/'
+
+class TT_TD3Policy(TD3Policy, TrajectoryTransformerActorCriticPolicy):
+    """
+    It inherits TD3Policy (required network layout for TD3) and the TT ActorCritic policy
+    """
+    def __init__(self, observation_space, action_space, lr_schedule, *args, **kwargs):
+        super(TT_TD3Policy, self).__init__(observation_space, action_space, lr_schedule, *args, **kwargs)
+        self.ortho_init = False
+
+    def _build_mlp_extractor(self) -> None:
+        TrajectoryTransformerActorCriticPolicy._build_mlp_extractor(self)
+
+    def set_adapter(self, adapter) -> None:
+        return TrajectoryTransformerActorCriticPolicy.set_adapter(self, adapter)
 
 def train_predict(args, predict_dt):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
@@ -36,7 +52,6 @@ def train_predict(args, predict_dt):
     test_loader = DataLoader(test_dataset, batch_size=len(test_dataset), pin_memory=True)
     print(len(train_loader), len(val_loader), len(test_loader))
 
-    # create or load model
     env_init = create_env_init(args, dataset=train_dataset)
     if args.policy == 'MLP':
         if getattr(args, 'resume_model_path', None) and os.path.exists(args.resume_model_path):
@@ -68,7 +83,7 @@ def train_predict(args, predict_dt):
                         seed=args.seed,
                         device=args.device)
     elif args.policy == 'TT' or args.policy == 'TRAJ':
-        # Trajectory Transformer wrapper policy (simple MLP extractor inside)
+        TD3_PARAMS = dict(buffer_size=100000, learning_rate=1e-3, batch_size=256, tau=0.005, gamma=0.99, train_freq=1, gradient_steps=1)
         policy_kwargs = dict(
             last_layer_dim_pi=args.num_stocks,
             last_layer_dim_vf=args.num_stocks,
@@ -77,12 +92,13 @@ def train_predict(args, predict_dt):
             print(f"Loading PPO model from {args.resume_model_path}")
             model = PPO.load(args.resume_model_path, env=env_init, device=args.device)
         else:
-            model = PPO(policy=TrajectoryTransformerActorCriticPolicy,
-                        env=env_init,
-                        policy_kwargs=policy_kwargs,
-                        **PPO_PARAMS,
-                        seed=args.seed,
-                        device=args.device)
+            model = TD3(policy=TT_TD3Policy,
+                env=env_init,
+                policy_kwargs=policy_kwargs,
+                seed=args.seed,
+                verbose=1,
+                device=args.device,
+                **TD3_PARAMS)
     train_model_and_predict(model, args, train_loader, val_loader, test_loader)
 
 
