@@ -1,0 +1,23 @@
+# Generated data and logs
+# These folders are large and should not be versioned
+
+dataset_default/
+logs/
+dataset/
+
+# Python caches and compiled artifacts
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+
+# Build/distribution outputs
+*.egg-info/
+*.egg
+build/
+dist/
+
+# Notebook checkpoints and editor clutter
+.ipynb_checkpoints/
+*.swp
+*.swo
