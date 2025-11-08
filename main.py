@@ -131,8 +131,8 @@ def train_predict(args, predict_dt):
                         device=args.device)
     elif args.policy == 'TT' or args.policy == 'TRAJ':
         # Use TD3 but attach transformer adapter
-        TD3_PARAMS = dict(buffer_size=100000, learning_rate=1e-3, batch_size=256,
-                        tau=0.005, gamma=0.99, train_freq=1, gradient_steps=1)
+        TD3_PARAMS = dict(buffer_size=10000, learning_rate=1e-4, batch_size=64,
+                        tau=0.005, gamma=0.9, train_freq=1, gradient_steps=1)
         policy_kwargs = dict(
             last_layer_dim_pi=args.num_stocks,
             last_layer_dim_vf=args.num_stocks,

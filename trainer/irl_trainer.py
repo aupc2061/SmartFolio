@@ -274,14 +274,14 @@ def model_predict(args, model, test_loader):
 
 def train_model_and_predict(model, args, train_loader, val_loader, test_loader):
     # --- 生成专家轨迹 ---
-    use_ga = getattr(args, 'use_ga_expert', True)  # Default to GA
+    use_ga = getattr(args, 'ensemble', True)  # Default to GA
     
     if use_ga:
         print("\n" + "="*70)
         print("Using Hybrid-Enhanced Expert Generation")
         print("="*70)
-        from gen_data.generate_expert_black import generate_hybrid_expert_trajectories
-        expert_trajectories = generate_hybrid_expert_trajectories(
+        from gen_data.generate_expert_black import generate_expert_trajectories
+        expert_trajectories = generate_expert_trajectories(
             args, 
             train_loader.dataset, 
             num_trajectories=100
