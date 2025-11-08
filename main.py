@@ -167,74 +167,6 @@ def train_predict(args, predict_dt):
             
             model.policy.set_adapter(adapter)
             print("Attached TrajectoryTransformerAdapter to TD3 policy")
-            from gen_data.generate_expert_black import generate_hybrid_expert_trajectories
-            from torch.utils.data import DataLoader as Load, TensorDataset
-            from tqdm import tqdm
-
-            print("\n==============================")
-            print("Fine-tuning Trajectory Transformer Adapter (FP32 + tqdm)...")
-            print("==============================")
-
-            # --- Step 1: Generate expert trajectories ---
-            expert_trajectories = generate_hybrid_expert_trajectories(
-                args,
-                train_dataset,
-                num_trajectories=2000  # you can increase if you want more training data
-            )
-
-            # --- Step 2: Prepare dataset ---
-            states = torch.tensor([t[0] for t in expert_trajectories], dtype=torch.float32).to(args.device)
-            actions = torch.tensor([t[1] for t in expert_trajectories], dtype=torch.float32).to(args.device)
-            dataset = TensorDataset(states, actions)
-            loader = Load(dataset, batch_size=16, shuffle=True)
-
-            # --- Step 3: Setup model for standard FP32 fine-tuning ---
-            adapter.model.train().to(args.device).float()
-            optimizer = torch.optim.AdamW(adapter.model.parameters(), lr=5e-5, weight_decay=1e-4)
-            loss_fn = torch.nn.MSELoss()
-
-            fine_tune_steps = min(args.fine_tune_steps, 2)  # control epochs here
-            grad_accum = 2  # gradient accumulation
-
-            # --- Step 4: Fine-tuning loop (FP32 only) ---
-            outer_bar = tqdm(range(fine_tune_steps), desc="Fine-tune Epochs", leave=True)
-            for step in outer_bar:
-                total_loss = 0.0
-                inner_bar = tqdm(loader, desc=f"Step {step+1}/{fine_tune_steps}", leave=False)
-
-                for batch_idx, (s, a) in enumerate(inner_bar):
-                    if len(s.shape) > 2:
-                        s = s.reshape(s.shape[0], -1)
-
-                    seqs = [adapter._make_token_sequence(si.cpu().numpy(), ai.cpu().numpy()) for si, ai in zip(s, a)]
-                    tokens = torch.tensor(seqs, dtype=torch.long, device=args.device)
-
-                    optimizer.zero_grad(set_to_none=True)
-
-                    # Forward + Backward in FP32
-                    outputs = adapter.model(tokens, return_dict=True)
-                    preds = outputs.logits[:, -1, :a.shape[1]].float()
-                    loss = loss_fn(preds, a.float())
-
-                    (loss / grad_accum).backward()
-                    if (batch_idx + 1) % grad_accum == 0:
-                        optimizer.step()
-                        optimizer.zero_grad(set_to_none=True)
-
-                    total_loss += loss.item()
-                    inner_bar.set_postfix({"BatchLoss": f"{loss.item():.4f}"})
-
-                avg_loss = total_loss / len(loader)
-                outer_bar.set_postfix({"AvgLoss": f"{avg_loss:.4f}"})
-
-            print(" Fine-tuning completed successfully (FP32 mode).")
-
-            # --- Step 5: Save the model ---
-            os.makedirs(args.save_dir, exist_ok=True)
-            ft_path = os.path.join(args.save_dir, "transformer_finetuned.pt")
-            torch.save(adapter.model.state_dict(), ft_path)
-            print(f"Saved fine-tuned transformer to {ft_path}\n")
-
         except Exception as e:
             print(f"Warning: failed to attach transformer adapter to TD3 policy: {e}")
 
@@ -274,7 +206,7 @@ if __name__ == '__main__':
     args.test_start_date = '2024-01-02'
     args.test_end_date = '2024-12-30'
     args.batch_size = 32
-    args.max_epochs = 20
+    args.max_epochs = 5
     args.seed = 123
     args.input_dim = 6
     args.ind_yn = True
