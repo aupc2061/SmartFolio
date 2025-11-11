@@ -188,18 +188,18 @@ class HGAT(nn.Module):
             all_embedding = torch.stack((support, ind_support), dim=1)
         all_embedding, sem_attn_weights = self.sem_gat(all_embedding, require_weights)     # (batch, num_nodes, 64)
         all_embedding = self.pn(all_embedding)
-        if require_weights:
-            # ind_degrees = torch.sum(ind_adj, dim=1)
-            # neg_degrees = torch.sum(neg_adj, dim=1)
-            # ind_attn_weights = pd.Series(ind_attn_weights.cpu().mean(dim=0).mean(dim=0).mean(dim=0).detach().numpy())
-            # neg_attn_weights = pd.Series(neg_attn_weights.cpu().mean(dim=0).mean(dim=0).mean(dim=0).detach().numpy())
-            # sem_attn_weights = pd.Series(sem_attn_weights.cpu().mean(dim=0).mean(dim=2).mean(dim=1).detach().numpy())
-            # attn_weights = pd.DataFrame()
-            # attn_weights['ind_degrees'] = ind_degrees.cpu().mean(dim=0).detach().numpy()
-            # attn_weights['neg_degrees'] = neg_degrees.cpu().mean(dim=0).detach().numpy()
-            # attn_weights['ind_weights'] = ind_attn_weights
-            # attn_weights['neg_weights'] = neg_attn_weights
-            # attn_weights['sem'] = sem_attn_weights
-            # attn_weights.to_csv('./results/attn_weights.csv', index=False)
-            return self.generator(all_embedding)
-        return self.generator(all_embedding)
+        allocations = self.generator(all_embedding)
+        if not require_weights:
+            return allocations
+
+        attn_payload = {
+            "industry": ind_attn_weights,
+            "positive": pos_attn_weights,
+            "negative": neg_attn_weights,
+            "semantic": sem_attn_weights,
+        }
+        if self.no_ind:
+            attn_payload.pop("industry", None)
+        if self.no_neg:
+            attn_payload.pop("negative", None)
+        return allocations, attn_payload

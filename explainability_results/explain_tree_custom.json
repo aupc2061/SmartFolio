@@ -1,0 +1,44 @@
+{
+  "model_path": "./checkpoints/ppo_hgat_custom_20251111_191020.zip",
+  "dataset_dir": "/home/pushpendras0026/inter/SmartFolio/dataset_default/data_train_predict_custom/1_hy",
+  "market": "custom",
+  "num_stocks": 97,
+  "input_dim": 6,
+  "global_r2": 0.044063808964989876,
+  "top_indices": [
+    86,
+    62,
+    49,
+    37,
+    31,
+    22,
+    0,
+    55,
+    10,
+    57
+  ],
+  "avg_weights": [
+    0.013706685043871403,
+    0.012419718317687511,
+    0.012330771423876286,
+    0.011978229507803917,
+    0.011947407387197018,
+    0.011913849972188473,
+    0.011901013553142548,
+    0.011753493919968605,
+    0.01174959447234869,
+    0.011680743657052517
+  ],
+  "top_tickers": [
+    "IIFL.NS",
+    "PAGEIND.NS",
+    "APOLLOTYRE.NS",
+    "PIDILITIND.NS",
+    "HEROMOTOCO.NS",
+    "ONGC.NS",
+    "RELIANCE.NS",
+    "LUPIN.NS",
+    "AXISBANK.NS",
+    "SRF.NS"
+  ]
+}

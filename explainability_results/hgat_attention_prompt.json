@@ -1,0 +1,141 @@
+{
+  "system_instruction": "You are a quantitative explainability analyst specializing in graph-based models. You will analyze the HGAT (Hierarchical Graph Attention Network) explainability summary used within a reinforcement-learning portfolio policy. Your goal is to interpret semantic attention weights, inter-stock relationships, and cross-stock influence patterns clearly and concisely for a technical audience.",
+  "instructions": "### Task\nAnalyze this HGAT attention summary for a reinforcement-learning portfolio allocator.\n\nExplain the following aspects:\n1. Semantic attention distribution \u2014 interpret each label (Self, Industry, Positive, Negative) and what their mean values imply about attention focus.\n2. Positive and negative attention edges \u2014 explain the relationships and leading nodes.\n3. Industry edge patterns \u2014 highlight any notable clustering or dependency trends.\n4. Summarize portfolio-level implications such as diversification, sector dependencies, or hedging structures.\n\n### Output Format\n- Section 1: Overview (market, num_stocks, checkpoint)\n- Section 2: Semantic attention interpretation\n- Section 3: Edge-level attention insights (industry, positive, negative)\n- Section 4: Portfolio interpretation summary\n\nKeep the tone analytical and quant-oriented, avoid generic statements.",
+  "example_output": "Example:\nThe HGAT network allocates higher mean attention to Positive (\u22480.43) and Industry (\u22480.20), indicating strong inter-stock relational reasoning and mild sector correlation learning. Negative attention centered on MARICO.NS suggests a hedging structure balancing overexposure from OBEROIRLTY.NS (a positive influencer).",
+  "attention_summary": {
+    "model_path": "./checkpoints/ppo_hgat_custom_20251111_191020.zip",
+    "market": "custom",
+    "num_stocks": 97,
+    "semantic_labels": [
+      "Self",
+      "Industry",
+      "Positive",
+      "Negative"
+    ],
+    "semantic_mean": [
+      0.15373343229293823,
+      0.1860520839691162,
+      0.4211391508579254,
+      0.23907533288002014
+    ],
+    "top_edges": {
+      "industry": [
+        {
+          "source_index": 59,
+          "source_ticker": "MARICO.NS",
+          "target_index": 29,
+          "target_ticker": "BRITANNIA.NS",
+          "mean_attention": 0.042160533368587494
+        },
+        {
+          "source_index": 59,
+          "source_ticker": "MARICO.NS",
+          "target_index": 19,
+          "target_ticker": "BAJFINANCE.NS",
+          "mean_attention": 0.041648805141448975
+        },
+        {
+          "source_index": 59,
+          "source_ticker": "MARICO.NS",
+          "target_index": 63,
+          "target_ticker": "MPHASIS.NS",
+          "mean_attention": 0.04125937819480896
+        },
+        {
+          "source_index": 59,
+          "source_ticker": "MARICO.NS",
+          "target_index": 57,
+          "target_ticker": "SRF.NS",
+          "mean_attention": 0.04076472669839859
+        },
+        {
+          "source_index": 39,
+          "source_ticker": "HAVELLS.NS",
+          "target_index": 10,
+          "target_ticker": "AXISBANK.NS",
+          "mean_attention": 0.01962083764374256
+        }
+      ],
+      "positive": [
+        {
+          "source_index": 84,
+          "source_ticker": "CDSL.NS",
+          "target_index": 67,
+          "target_ticker": "OBEROIRLTY.NS",
+          "mean_attention": 0.18614943325519562
+        },
+        {
+          "source_index": 92,
+          "source_ticker": "PVRINOX.NS",
+          "target_index": 67,
+          "target_ticker": "OBEROIRLTY.NS",
+          "mean_attention": 0.17925210297107697
+        },
+        {
+          "source_index": 75,
+          "source_ticker": "AARTIIND.NS",
+          "target_index": 67,
+          "target_ticker": "OBEROIRLTY.NS",
+          "mean_attention": 0.17650701105594635
+        },
+        {
+          "source_index": 38,
+          "source_ticker": "INDIGO.NS",
+          "target_index": 67,
+          "target_ticker": "OBEROIRLTY.NS",
+          "mean_attention": 0.17622938752174377
+        },
+        {
+          "source_index": 53,
+          "source_ticker": "AUROPHARMA.NS",
+          "target_index": 67,
+          "target_ticker": "OBEROIRLTY.NS",
+          "mean_attention": 0.1722509264945984
+        }
+      ],
+      "negative": [
+        {
+          "source_index": 34,
+          "source_ticker": "TATACOMM.NS",
+          "target_index": 59,
+          "target_ticker": "MARICO.NS",
+          "mean_attention": 0.5627024173736572
+        },
+        {
+          "source_index": 38,
+          "source_ticker": "INDIGO.NS",
+          "target_index": 59,
+          "target_ticker": "MARICO.NS",
+          "mean_attention": 0.5211666822433472
+        },
+        {
+          "source_index": 75,
+          "source_ticker": "AARTIIND.NS",
+          "target_index": 59,
+          "target_ticker": "MARICO.NS",
+          "mean_attention": 0.5177057385444641
+        },
+        {
+          "source_index": 79,
+          "source_ticker": "GRSE.NS",
+          "target_index": 59,
+          "target_ticker": "MARICO.NS",
+          "mean_attention": 0.502495527267456
+        },
+        {
+          "source_index": 59,
+          "source_ticker": "MARICO.NS",
+          "target_index": 59,
+          "target_ticker": "MARICO.NS",
+          "mean_attention": 0.4986984133720398
+        }
+      ]
+    },
+    "avg_allocations_summary": {
+      "mean": 0.4775954309812526,
+      "std": 0.024591295305123877,
+      "min": 0.42525288462638855,
+      "max": 0.540020763874054
+    }
+  }
+}
