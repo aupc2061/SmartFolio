@@ -53,7 +53,7 @@ def build_risk_profile(risk_score: float) -> dict:
         # MAX WEIGHT CAP: Linear interpolation 0.10 → 0.50
         # Conservative users: max 10% per stock (force diversification)
         # Aggressive users: max 50% per stock (allow concentration)
-        'max_weight': 0.10 + (0.40 * risk_score),
+        'max_weight': 0.10 + (0.50 * risk_score),
         
         # MIN WEIGHT FLOOR: Linear interpolation 0.005 → 0.02
         # Conservative: 0.5% minimum (many positions)
@@ -66,7 +66,7 @@ def build_risk_profile(risk_score: float) -> dict:
         # ACTION TEMPERATURE: Controls softmax spread
         # Higher temp → More uniform → More diversified
         # Lower temp → Sharper peaks → More concentrated
-        'action_temperature': max(1e-3, 1.0 + (1.0 - risk_score)),
+        'action_temperature': max(1e-3, 0.2 + 2.3 * (1.0 - risk_score)),
         
         # PENALTIES for reward shaping
         'variance_penalty': 1.0 - (0.5 * risk_score),        # Higher for conservative
