@@ -55,7 +55,7 @@ class StockPortfolioEnv(gym.Env):
         except KeyError:
             print(f"\n⚠ ERROR: 'action_temperature' not in risk_profile!")
             print(f"  Using computed default: 1.0 + (1.0 - risk_score)")
-            self.action_temperature = 1.0 + (1.0 - self.risk_score)
+            self.action_temperature = 0.2 + 2.3 * (1.0 - self.risk_score)
         self.current_step = 0
         self.max_step = returns.shape[0] - 1
         self.done = False
