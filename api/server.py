@@ -37,13 +37,12 @@ import sys
 
 
 class InferenceRequest(BaseModel):
-    model_path: Optional[str] = None  # Auto-derived from risk_score if not provided
-    save_dir: str = "./checkpoints"  # Base directory for checkpoints
+    model_path: str = Field(..., description="Path to PPO checkpoint (.zip)")
     market: str = "custom"
     horizon: str = "1"
     relation_type: str = "hy"
-    test_start_date: str = "2024-01-02"
-    test_end_date: str = "2024-01-31"
+    test_start_date: str = Field(..., description="YYYY-MM-DD")
+    test_end_date: str = Field(..., description="YYYY-MM-DD")
     deterministic: bool = True
     ind_yn: bool = True
     pos_yn: bool = True
@@ -69,43 +68,70 @@ class StabilityRequest(BaseModel):
 
 
 class FinetuneRequest(BaseModel):
-    save_dir: str = "./checkpoints"
-    device: str = "cpu"
-    market: str = "custom"
-    horizon: str = "1"
-    relation_type: str = "hy"
-    fine_tune_steps: int = 1
-    baseline_checkpoint: Optional[str] = None  # Auto-generated based on risk_score if not provided
-    resume_model_path: Optional[str] = None  # Auto-generated based on risk_score if not provided
-    reward_net_path: Optional[str] = None  # Auto-generated based on risk_score if not provided
-    batch_size: int = 16
-    n_steps: int = 2048
-    # Risk score for this fine-tuning run (determines which checkpoint to use/update)
-    risk_score: float = 0.5  # One of: 0.1, 0.3, 0.5, 0.7, 0.9
-    # PTR PPO arguments
-    ptr_mode: bool = True  # Enable PTR PPO for continual learning
-    ptr_coef: float = 0.1  # Coefficient for PTR loss (KL divergence penalty)
-    ptr_memory_size: int = 1000  # Maximum samples in PTR replay buffer
-    # Data fetching
-    fetch_new_data: bool = False  # If True, fetch latest month from yfinance before fine-tuning
-    tickers_file: str = "tickers.csv"  # Path to tickers CSV file
+    manifest_path: str = Field(
+        "dataset_default/data_train_predict_custom/1_hy/monthly_manifest.json",
+        description="Matches --manifest_path when calling main.py",
+    )
+    save_dir: str = Field("./checkpoints", description="Matches --save_dir")
+    device: str = Field("cpu", description="Matches -device/--device")
+    run_monthly_fine_tune: bool = Field(True, description="Set when using --run_monthly_fine_tune")
+    market: str = Field("custom", description="Dataset market identifier passed via --market")
+    horizon: str = Field("1", description="Matches --horizon")
+    relation_type: str = Field("hy", description="Matches --relation_type")
+    fine_tune_steps: int = Field(1, description="Matches --fine_tune_steps")
+    baseline_checkpoint: Optional[str] = Field(
+        "checkpoints/baseline(1).zip",
+        description="Matches --baseline_checkpoint",
+    )
+    promotion_min_sharpe: float = Field(0.5, description="Matches --promotion_min_sharpe")
+    promotion_max_drawdown: float = Field(0.2, description="Matches --promotion_max_drawdown")
+    resume_model_path: Optional[str] = Field(
+        "checkpoints/baseline(1).zip",
+        description="Matches --resume_model_path",
+    )
+    reward_net_path: Optional[str] = Field(
+        "checkpoints/reward_net_custom_20251202_164846.pt",
+        description="Matches --reward_net_path",
+    )
+    batch_size: int = Field(16, description="Matches --batch_size")
+    n_steps: int = Field(2048, description="Matches --n_steps")
+    num_stocks: int = Field(97, description="Optional manual override if auto-detect fails")
+    ptr_mode: bool = Field(False, description="Set true to mirror --ptr_mode flag")
+    ptr_coef: float = Field(0.1, description="Matches --ptr_coef")
+    ptr_memory_size: int = Field(1000, description="Matches --ptr_memory_size")
+    ptr_priority_type: str = Field(
+        "max",
+        description="Matches --ptr_priority_type (when PTR is enabled)",
+    )
 
     model_config = {
         "json_schema_extra": {
-            "examples": [{}]  # Empty object uses all defaults
+            "examples": [
+                {
+                    "manifest_path": "dataset_default/data_train_predict_custom/1_hy/monthly_manifest.json",
+                    "save_dir": "./checkpoints",
+                    "device": "cpu",
+                    "run_monthly_fine_tune": True,
+                    "market": "custom",
+                    "horizon": "1",
+                    "relation_type": "hy",
+                    "fine_tune_steps": 1,
+                    "baseline_checkpoint": "checkpoints/baseline(1).zip",
+                    "resume_model_path": "checkpoints/baseline(1).zip",
+                    "reward_net_path": "checkpoints/reward_net_custom_20251202_164846.pt",
+                    "batch_size": 16,
+                    "n_steps": 2048,
+                    "num_stocks": 97,
+                    "ptr_mode": True,
+                    "ptr_coef": 0.1,
+                    "ptr_memory_size": 1000,
+                    "ptr_priority_type": "max",
+                    "promotion_min_sharpe": 0.5,
+                    "promotion_max_drawdown": 0.2,
+                }
+            ]
         }
     }
-
-
-def get_risk_score_dir(base_dir: str, risk_score: float) -> str:
-    """Get the checkpoint directory for a specific risk score.
-    
-    Examples:
-        base_dir='checkpoints', risk_score=0.5 -> 'checkpoints_risk05'
-        base_dir='./checkpoints', risk_score=0.1 -> './checkpoints_risk01'
-    """
-    risk_tag = str(risk_score).replace('.', '')
-    return f"{base_dir.rstrip('/')}_risk{risk_tag}"
 
 
 def _dataset_dir(req: InferenceRequest) -> Path:
@@ -136,17 +162,7 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
     test_loader = _load_test_loader(req)
     print(f"[SERVER] Loaded test loader with {len(test_loader)} batches", flush=True)
 
-    # Auto-derive model_path from risk_score if not explicitly provided
-    if req.model_path:
-        model_path = Path(req.model_path).expanduser()
-        used_model_path = str(model_path)
-    else:
-        # Use baseline.zip from the risk-score-specific directory
-        save_dir = get_risk_score_dir(req.save_dir, req.risk_score)
-        model_path = Path(save_dir) / "baseline.zip"
-        used_model_path = str(model_path)
-        print(f"[SERVER] Auto-derived model path from risk_score={req.risk_score}: {model_path}", flush=True)
-    
+    model_path = Path(req.model_path).expanduser()
     if not model_path.exists():
         raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
 
@@ -303,8 +319,6 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
 
     return {
         "metrics": records,
-        "model_path": used_model_path,
-        "risk_score": req.risk_score,
         "weights_csv": str(weights_csv) if all_weights_data else None,
         "portfolio_values_csv": str(portfolio_csv) if portfolio_value_data else None,
         "portfolio_values_summary": portfolio_summary,
@@ -406,59 +420,11 @@ def stability(req: StabilityRequest):
 @app.post("/finetune")
 def finetune(req: FinetuneRequest):
     try:
-        import pickle
-        import glob
-        
-        # Modify save_dir to include risk score (e.g., checkpoints -> checkpoints_risk05)
-        save_dir = get_risk_score_dir(req.save_dir, req.risk_score)
-        os.makedirs(save_dir, exist_ok=True)
-        
-        # All paths are now relative to the risk-score-specific directory
-        baseline_path = req.baseline_checkpoint or os.path.join(save_dir, "baseline.zip")
-        resume_path = req.resume_model_path or baseline_path
-        buffer_path = os.path.join(save_dir, f"replay_buffer_{req.market}.pkl")
-        
-        # Auto-discover latest reward_net in the risk-score directory if not provided
-        reward_net_path = req.reward_net_path
-        if reward_net_path is None:
-            pattern = os.path.join(save_dir, f"reward_net_{req.market}_*.pt")
-            matching_files = sorted(glob.glob(pattern))
-            if matching_files:
-                reward_net_path = matching_files[-1]  # Latest by timestamp in filename
-                print(f"[FINETUNE] Auto-discovered reward_net: {reward_net_path}")
-            else:
-                print(f"[FINETUNE] No reward_net found matching {pattern}")
-        
-        print(f"[FINETUNE] Risk score: {req.risk_score}")
-        print(f"[FINETUNE] Save directory: {save_dir}")
-        print(f"[FINETUNE] Baseline checkpoint: {baseline_path}")
-        print(f"[FINETUNE] Resume model path: {resume_path}")
-        print(f"[FINETUNE] Reward net path: {reward_net_path}")
-        print(f"[FINETUNE] Replay buffer path: {buffer_path}")
-        
-        # If fetch_new_data is enabled, we might not have existing data yet
-        data_dir = f'dataset_default/data_train_predict_{req.market}/{req.horizon}_{req.relation_type}/'
-        
-        # Optionally fetch new data BEFORE we check for pkl files
-        # This allows us to fetch data for a fresh month before fine-tuning
-        if req.fetch_new_data:
-            try:
-                from gen_data.update_monthly_dataset import fetch_latest_month_data
-                print("Fetching latest month data from yfinance...")
-                fetched_month = fetch_latest_month_data(
-                    market=req.market,
-                    horizon=int(req.horizon),
-                    relation_type=req.relation_type,
-                    tickers_file=req.tickers_file,
-                    lookback=30,
-                )
-                print(f"Successfully fetched data for month: {fetched_month}")
-            except Exception as e:
-                print(f"Warning: Could not fetch new data: {e}")
-                print("Continuing with existing data...")
-        
         # Auto-detect num_stocks from a sample pickle file (same as main.py)
+        import pickle
+        data_dir = f'dataset_default/data_train_predict_{req.market}/{req.horizon}_{req.relation_type}/'
         sample_files = [f for f in os.listdir(data_dir) if f.endswith('.pkl')]
+        num_stocks = req.num_stocks
         if sample_files:
             sample_path = os.path.join(data_dir, sample_files[0])
             with open(sample_path, 'rb') as f:
@@ -466,14 +432,20 @@ def finetune(req: FinetuneRequest):
             num_stocks = sample_data['features'].shape[0]
             print(f"Auto-detected num_stocks: {num_stocks}")
         else:
-            raise ValueError(f"No pickle files found in {data_dir} to determine num_stocks")
+            print(
+                "No pickle files available for auto-detect; falling back to request num_stocks="
+                f"{num_stocks}"
+            )
+            if not num_stocks:
+                raise ValueError(f"Unable to determine num_stocks for {data_dir} (provide num_stocks in request)")
 
-        # Load replay buffer if available (in risk-score directory)
+        # Load replay buffer if available (same as main.py)
         replay_buffer = []
+        buffer_path = os.path.join(req.save_dir, f"replay_buffer_{req.market}.pkl")
         if os.path.exists(buffer_path):
             with open(buffer_path, "rb") as f:
                 replay_buffer = pickle.load(f)
-            print(f"Loaded replay buffer with {len(replay_buffer)} samples from {buffer_path}")
+            print(f"Loaded replay buffer with {len(replay_buffer)} samples.")
 
         args = argparse.Namespace(
             device=req.device,
@@ -485,27 +457,47 @@ def finetune(req: FinetuneRequest):
             neg_yn=True,
             ptr_coef=req.ptr_coef,
             ptr_memory_size=req.ptr_memory_size,
+            ptr_priority_type=req.ptr_priority_type,
             batch_size=req.batch_size,
             n_steps=req.n_steps,
-            tickers_file=req.tickers_file,
-            resume_model_path=resume_path,
-            reward_net_path=reward_net_path,  # Use discovered or provided path
+            tickers_file="tickers.csv",
+            multi_reward_yn=True,
+            resume_model_path=req.resume_model_path,
+            reward_net_path=req.reward_net_path,
             fine_tune_steps=req.fine_tune_steps,
-            save_dir=save_dir,  # Use risk-score-specific directory
-            baseline_checkpoint=baseline_path,
+            save_dir=req.save_dir,
+            baseline_checkpoint=req.baseline_checkpoint,
+            promotion_min_sharpe=req.promotion_min_sharpe,
+            promotion_max_drawdown=req.promotion_max_drawdown,
+            run_monthly_fine_tune=req.run_monthly_fine_tune,
+            discover_months_with_pathway=False,
+            month_cutoff_days=None,
+            min_month_days=10,
+            expert_cache_path=None,
+            irl_epochs=5,
+            rl_timesteps=1,
+            risk_score=0.5,
+            dd_base_weight=1.0,
+            dd_risk_factor=1.0,
             market=req.market,
             seed=123,
             input_dim=6,
+            ind=True,
+            pos=True,
+            neg=True,
+            relation="hy",
             num_stocks=num_stocks,
             lookback=30,
+            finrag_prior=None,
+            finrag_weights_path=None,
+            manifest=req.manifest_path,
             ptr_mode=req.ptr_mode,
-            risk_score=req.risk_score,  # Pass risk_score to args
         )
         
-        # Call fine_tune_month (no need to pass fetch_new_data again since we did it above)
-        checkpoint, new_samples = fine_tune_month(args, replay_buffer=replay_buffer, fetch_new_data=False)
+        # Call fine_tune_month (returns checkpoint path AND new replay samples)
+        checkpoint, new_samples = fine_tune_month(args, manifest_path=req.manifest_path, replay_buffer=replay_buffer)
         
-        # Update replay buffer with new samples (in risk-score directory)
+        # Update replay buffer with new samples (same as main.py)
         if new_samples:
             replay_buffer.extend(new_samples)
             max_buffer = req.ptr_memory_size
@@ -513,16 +505,13 @@ def finetune(req: FinetuneRequest):
                 # Keep the most recent ones
                 replay_buffer = replay_buffer[-max_buffer:]
             print(f"Replay buffer updated. Current size: {len(replay_buffer)}")
+            os.makedirs(req.save_dir, exist_ok=True)
             with open(buffer_path, "wb") as f:
                 pickle.dump(replay_buffer, f)
             print(f"Persisted replay buffer to {buffer_path}")
         
         return {
             "checkpoint": checkpoint,
-            "risk_score": req.risk_score,
-            "save_dir": save_dir,
-            "baseline_checkpoint": baseline_path,
-            "replay_buffer_path": buffer_path,
             "replay_buffer_size": len(replay_buffer),
             "new_samples_added": len(new_samples) if new_samples else 0,
         }
