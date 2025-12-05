@@ -340,7 +340,7 @@ def model_predict(args, model, test_loader, split: str = "test"):
         max_step = len(labels)
 
         for _ in range(max_step):
-            action, _states = model.predict(obs_test, deterministic=False)
+            action, _states = model.predict(obs_test, deterministic=True)
             obs_test, reward, done, info = env_test.step(action)
             if done:
                 break

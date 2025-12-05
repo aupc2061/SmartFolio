@@ -29,7 +29,7 @@ from dataloader.data_loader import AllGraphDataSampler
 from env.portfolio_env import StockPortfolioEnv
 from trainer.irl_trainer import process_data
 from tools.weights_persistence_viz import load_tickers, rank_frequency, summarize, turnover
-from main import fine_tune_month
+from main import fine_tune_month, get_risk_score_dir
 from utils.ticker_mapping import get_ticker_mapping_for_period
 
 import subprocess
@@ -68,11 +68,11 @@ class StabilityRequest(BaseModel):
 
 
 class FinetuneRequest(BaseModel):
-    manifest_path: str = Field(
-        "dataset_default/data_train_predict_custom/1_hy/monthly_manifest.json",
-        description="Matches --manifest_path when calling main.py",
+    manifest_path: Optional[str] = Field(
+        None,
+        description="Deprecated manifest path; kept for compatibility, not required.",
     )
-    save_dir: str = Field("./checkpoints", description="Matches --save_dir")
+    save_dir: str = Field("./checkpoints", description="Base checkpoint directory (risk suffix is added automatically)")
     device: str = Field("cpu", description="Matches -device/--device")
     run_monthly_fine_tune: bool = Field(True, description="Set when using --run_monthly_fine_tune")
     market: str = Field("custom", description="Dataset market identifier passed via --market")
@@ -80,58 +80,66 @@ class FinetuneRequest(BaseModel):
     relation_type: str = Field("hy", description="Matches --relation_type")
     fine_tune_steps: int = Field(1, description="Matches --fine_tune_steps")
     baseline_checkpoint: Optional[str] = Field(
-        "checkpoints/baseline(1).zip",
-        description="Matches --baseline_checkpoint",
+        None,
+        description="Optional override for --baseline_checkpoint; defaults to <save_dir_risk>/baseline.zip",
     )
     promotion_min_sharpe: float = Field(0.5, description="Matches --promotion_min_sharpe")
     promotion_max_drawdown: float = Field(0.2, description="Matches --promotion_max_drawdown")
     resume_model_path: Optional[str] = Field(
-        "checkpoints/baseline(1).zip",
-        description="Matches --resume_model_path",
+        None,
+        description="Optional override for --resume_model_path; defaults to baseline in risk-scored directory",
     )
     reward_net_path: Optional[str] = Field(
-        "checkpoints/reward_net_custom_20251202_164846.pt",
-        description="Matches --reward_net_path",
+        None,
+        description="Optional path for IRL reward net; leave null to skip",
     )
     batch_size: int = Field(16, description="Matches --batch_size")
     n_steps: int = Field(2048, description="Matches --n_steps")
-    num_stocks: int = Field(97, description="Optional manual override if auto-detect fails")
-    ptr_mode: bool = Field(False, description="Set true to mirror --ptr_mode flag")
-    ptr_coef: float = Field(0.1, description="Matches --ptr_coef")
+    num_stocks: Optional[int] = Field(
+        None, description="Optional manual override if auto-detect fails"
+    )
+    ptr_mode: bool = Field(True, description="Set true to mirror --ptr_mode flag")
+    use_ptr: bool = Field(True, description="Deprecated; use ptr_mode instead")
+    ptr_coef: float = Field(0.3, description="Matches --ptr_coef")
     ptr_memory_size: int = Field(1000, description="Matches --ptr_memory_size")
     ptr_priority_type: str = Field(
         "max",
         description="Matches --ptr_priority_type (when PTR is enabled)",
     )
+    risk_score: float = Field(0.5, description="Risk score used for directory routing and reward shaping")
+    stream: Optional[str] = Field(
+        None,
+        description="Pathway streaming flag (matches positional 'stream' arg in main.py)",
+    )
 
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "manifest_path": "dataset_default/data_train_predict_custom/1_hy/monthly_manifest.json",
-                    "save_dir": "./checkpoints",
-                    "device": "cpu",
-                    "run_monthly_fine_tune": True,
-                    "market": "custom",
-                    "horizon": "1",
-                    "relation_type": "hy",
-                    "fine_tune_steps": 1,
-                    "baseline_checkpoint": "checkpoints/baseline(1).zip",
-                    "resume_model_path": "checkpoints/baseline(1).zip",
-                    "reward_net_path": "checkpoints/reward_net_custom_20251202_164846.pt",
-                    "batch_size": 16,
-                    "n_steps": 2048,
-                    "num_stocks": 97,
-                    "ptr_mode": True,
-                    "ptr_coef": 0.1,
-                    "ptr_memory_size": 1000,
-                    "ptr_priority_type": "max",
-                    "promotion_min_sharpe": 0.5,
-                    "promotion_max_drawdown": 0.2,
-                }
-            ]
-        }
-    }
+    # model_config = {
+    #     "json_schema_extra": {
+    #         "examples": [
+    #             {
+    #                 "manifest_path": "dataset_default/data_train_predict_custom/1_hy/monthly_manifest.json",
+    #                 "save_dir": "./checkpoints",
+    #                 "device": "cpu",
+    #                 "run_monthly_fine_tune": True,
+    #                 "market": "custom",
+    #                 "horizon": "1",
+    #                 "relation_type": "hy",
+    #                 "fine_tune_steps": 1,
+    #                 "baseline_checkpoint": "checkpoints/baseline(1).zip",
+    #                 "resume_model_path": "checkpoints/baseline(1).zip",
+    #                 "reward_net_path": "checkpoints/reward_net_custom_20251202_164846.pt",
+    #                 "batch_size": 16,
+    #                 "n_steps": 2048,
+    #                 "num_stocks": 97,
+    #                 "ptr_mode": True,
+    #                 "ptr_coef": 0.1,
+    #                 "ptr_memory_size": 1000,
+    #                 "ptr_priority_type": "max",
+    #                 "promotion_min_sharpe": 0.5,
+    #                 "promotion_max_drawdown": 0.2,
+    #             }
+    #         ]
+    #     }
+    # }
 
 
 def _dataset_dir(req: InferenceRequest) -> Path:
@@ -162,6 +170,14 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
     test_loader = _load_test_loader(req)
     print(f"[SERVER] Loaded test loader with {len(test_loader)} batches", flush=True)
 
+    ticker_map = get_ticker_mapping_for_period(
+        req.market,
+        req.test_start_date,
+        req.test_end_date,
+        base_dir="dataset_default"
+    )
+    date_keys = list(ticker_map.keys()) if ticker_map else []
+    
     model_path = Path(req.model_path).expanduser()
     if not model_path.exists():
         raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
@@ -180,6 +196,8 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
 
     print(f"[SERVER] Starting inference loop", flush=True)
     
+    final_weights_map: Dict[str, float] = {}
+
     for batch_idx, data in enumerate(test_loader):
         print(f"[SERVER] Processing batch {batch_idx}", flush=True)
         sys.stdout.flush()
@@ -242,10 +260,7 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
         for step in range(max_step):
             action, _states = model.predict(obs_test, deterministic=req.deterministic)
             obs_test, reward, done, info = env_test.step(action)
-            if step % 10 == 0:
-                print(f"[SERVER]   Step {step}/{max_step}", flush=True)
             if done:
-                print(f"[SERVER]   Done at step {step}", flush=True)
                 break
 
         print(f"[SERVER] Inference complete for batch {batch_idx}", flush=True)
@@ -268,21 +283,30 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
         if weights_array.size > 0:
             num_steps, num_stocks = weights_array.shape
             step_labels = getattr(env_test, "dates", list(range(num_steps)))
+            # Build a ticker list for each step if available
+            def _tickers_for_step(step_idx: int):
+                if step_idx < len(date_keys):
+                    candidate = ticker_map.get(date_keys[step_idx])
+                    if candidate and len(candidate) == num_stocks:
+                        return candidate
+                return [f"stock_{i}" for i in range(num_stocks)]
+
             for step_idx in range(num_steps):
                 weights = weights_array[step_idx]
                 step_value = step_labels[step_idx] if step_idx < len(step_labels) else step_idx
                 
                 portfolio_value = float(net_value_history[step_idx]) if step_idx < len(net_value_history) else None
                 daily_return = float(daily_returns_history[step_idx]) if step_idx < len(daily_returns_history) else None
+                tickers = _tickers_for_step(step_idx)
                 
                 for idx, weight in enumerate(weights):
                     if weight > 0.0001:
                         all_weights_data.append({
                             "run_id": f"api_run_{batch_idx}",
                             "batch": batch_idx,
-                            "date": None,
+                            "date": date_keys[step_idx] if step_idx < len(date_keys) else None,
                             "step": step_value,
-                            "ticker": f"stock_{idx}",
+                            "ticker": tickers[idx] if idx < len(tickers) else f"stock_{idx}",
                             "weight": float(weight),
                             "weight_pct": float(weight * 100),
                             "portfolio_value": portfolio_value,
@@ -296,6 +320,14 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
                     "portfolio_value": portfolio_value,
                     "daily_return": daily_return,
                 })
+
+            # Save final step weights mapping for quick access in response
+            final_step_idx = num_steps - 1
+            final_tickers = _tickers_for_step(final_step_idx)
+            final_weights_map = {
+                (final_tickers[i] if i < len(final_tickers) else f"stock_{i}"): float(w)
+                for i, w in enumerate(weights_array[final_step_idx])
+            }
 
     out_dir = Path(req.output_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -325,6 +357,7 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
         "final_portfolio_value": final_net_value,
         "peak_value": peak_value,
         "current_value": current_value,
+        "final_weights": final_weights_map if final_weights_map else None,
     }
 
 
@@ -441,11 +474,20 @@ def finetune(req: FinetuneRequest):
 
         # Load replay buffer if available (same as main.py)
         replay_buffer = []
-        buffer_path = os.path.join(req.save_dir, f"replay_buffer_{req.market}.pkl")
+        save_dir_risk = get_risk_score_dir(req.save_dir, req.risk_score)
+        buffer_path = os.path.join(save_dir_risk, f"replay_buffer_{req.market}.pkl")
         if os.path.exists(buffer_path):
             with open(buffer_path, "rb") as f:
                 replay_buffer = pickle.load(f)
-            print(f"Loaded replay buffer with {len(replay_buffer)} samples.")
+            print(f"Loaded replay buffer with {len(replay_buffer)} samples from {buffer_path}.")
+
+        # Resolve checkpoint paths with risk-scored directory fallback
+        baseline_ckpt = req.baseline_checkpoint or os.path.join(save_dir_risk, "baseline.zip")
+        resume_ckpt = req.resume_model_path or baseline_ckpt
+        reward_net_path = req.reward_net_path
+        if reward_net_path is not None:
+            reward_net_path = os.path.expanduser(reward_net_path)
+        os.makedirs(save_dir_risk, exist_ok=True)
 
         args = argparse.Namespace(
             device=req.device,
@@ -455,6 +497,7 @@ def finetune(req: FinetuneRequest):
             ind_yn=True,
             pos_yn=True,
             neg_yn=True,
+            use_ptr=req.use_ptr,
             ptr_coef=req.ptr_coef,
             ptr_memory_size=req.ptr_memory_size,
             ptr_priority_type=req.ptr_priority_type,
@@ -462,11 +505,11 @@ def finetune(req: FinetuneRequest):
             n_steps=req.n_steps,
             tickers_file="tickers.csv",
             multi_reward_yn=True,
-            resume_model_path=req.resume_model_path,
-            reward_net_path=req.reward_net_path,
+            resume_model_path=resume_ckpt,
+            reward_net_path=reward_net_path,
             fine_tune_steps=req.fine_tune_steps,
-            save_dir=req.save_dir,
-            baseline_checkpoint=req.baseline_checkpoint,
+            save_dir=save_dir_risk,
+            baseline_checkpoint=baseline_ckpt,
             promotion_min_sharpe=req.promotion_min_sharpe,
             promotion_max_drawdown=req.promotion_max_drawdown,
             run_monthly_fine_tune=req.run_monthly_fine_tune,
@@ -492,6 +535,8 @@ def finetune(req: FinetuneRequest):
             finrag_weights_path=None,
             manifest=req.manifest_path,
             ptr_mode=req.ptr_mode,
+            risk_score=req.risk_score,
+            stream=req.stream,
         )
         
         # Call fine_tune_month (returns checkpoint path AND new replay samples)
@@ -505,7 +550,7 @@ def finetune(req: FinetuneRequest):
                 # Keep the most recent ones
                 replay_buffer = replay_buffer[-max_buffer:]
             print(f"Replay buffer updated. Current size: {len(replay_buffer)}")
-            os.makedirs(req.save_dir, exist_ok=True)
+            os.makedirs(save_dir_risk, exist_ok=True)
             with open(buffer_path, "wb") as f:
                 pickle.dump(replay_buffer, f)
             print(f"Persisted replay buffer to {buffer_path}")

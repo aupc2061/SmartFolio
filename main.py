@@ -126,27 +126,6 @@ def load_weights_into_new_model(
     _copy_compatible_policy_weights(model.policy, policy_state, path)
     return model
 
-def _default_manifest_path(args) -> Path:
-    """Compute the canonical manifest path under dataset_default for given args."""
-    return Path(PATH_DATA) / f"data_train_predict_{args.market}" / f"{args.horizon}_{args.relation_type}" / "monthly_manifest.json"
-
-
-def _resolve_manifest_path(args, manifest_path: str | None) -> Path:
-    """
-    Resolve a manifest path, preferring an explicit existing file, otherwise the
-    canonical dataset directory location.
-    """
-    if manifest_path:
-        candidate = Path(manifest_path).expanduser()
-        if candidate.is_file():
-            return candidate
-        if not candidate.is_absolute():
-            alt = _default_manifest_path(args).with_name(candidate.name)
-            if alt.is_file():
-                return alt
-    return _default_manifest_path(args)
-
-
 def load_finrag_prior(weights_path, num_stocks, tickers_csv="tickers.csv"):
     """
     Load FinRAG weights from a JSON file and normalize them to a simplex vector.
@@ -220,43 +199,6 @@ def init_policy_bias_from_prior(model, prior_weights):
         action_net.bias.copy_(prior_logits)
     print("Initialized policy action bias from FinRAG prior.")
 
-
-def _infer_month_dates(shard):
-    """Infer month label, start, and end date strings from a manifest shard."""
-    month_label = shard.get("month")
-    month_start = shard.get("month_start") or shard.get("start_date") or shard.get("train_start_date")
-    month_end = shard.get("month_end") or shard.get("end_date") or shard.get("train_end_date")
-
-    # Normalise the month label
-    parsed_month = None
-    if month_label:
-        for fmt in ("%Y-%m", "%Y-%m-%d"):
-            try:
-                parsed_month = datetime.strptime(month_label, fmt)
-                break
-            except ValueError:
-                continue
-    if parsed_month is None and month_start:
-        for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
-            try:
-                parsed_month = datetime.strptime(month_start, fmt)
-                month_label = parsed_month.strftime("%Y-%m")
-                break
-            except ValueError:
-                continue
-
-    if parsed_month and not month_start:
-        month_start = parsed_month.strftime("%Y-%m-01")
-
-    if parsed_month and not month_end and month_start:
-        last_day = calendar.monthrange(parsed_month.year, parsed_month.month)[1]
-        month_end = parsed_month.replace(day=last_day).strftime("%Y-%m-%d")
-
-    if not (month_label and month_start and month_end):
-        raise ValueError(f"Unable to infer complete month information from shard: {shard}")
-
-    return month_label, month_start, month_end
-
 def select_replay_samples(model, env, dataset, k_percent=0.3):
     
     print("Selecting replay samples...")
@@ -288,7 +230,7 @@ def select_replay_samples(model, env, dataset, k_percent=0.3):
     print(f"Selected {len(selected_samples)} replay samples from {len(dataset)} total.")
     return selected_samples
 
-def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buffer=None, fetch_new_data=True):
+def fine_tune_month(args, bookkeeping_path=None, replay_buffer=None, fetch_new_data=True):
     """
     Fine-tune the PPO model on the latest month derived from pkl files in the data directory.
     
@@ -302,10 +244,10 @@ def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buff
     
     Args:
         args: Namespace with market, horizon, relation_type, etc.
-        manifest_path: Deprecated (ignored)
         bookkeeping_path: Deprecated (ignored)
         replay_buffer: Optional list of replay samples from previous training
         fetch_new_data: If True, fetch latest month from yfinance before fine-tuning
+        stream: Flag for using pathway streaming
     """
     # Data directory containing daily pkl files
     base_dir = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
@@ -320,7 +262,8 @@ def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buff
                 horizon=int(args.horizon),
                 relation_type=args.relation_type,
                 tickers_file=tickers_file,
-                lookback=getattr(args, "lookback", 20),
+                lookback=getattr(args, "lookback", 30),
+                stream=args.stream
             )
             print(f"Successfully fetched data for month: {fetched_month}")
         except Exception as e:
@@ -344,37 +287,65 @@ def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buff
             dates.append(dt)
         except ValueError:
             continue  # Skip files that don't match date format
-    
+
     if not dates:
         raise ValueError(f"No valid date-named pkl files found in {base_dir}")
-    
-    # Sort dates and find the latest
+
+    # Unique month labels sorted
     dates.sort()
-    latest_date = dates[-1]
-    
-    # Derive the month to fine-tune (the month of the latest date)
-    month_label = latest_date.strftime("%Y-%m")
-    
-    # Get all dates in this month
-    month_dates = [d for d in dates if d.strftime("%Y-%m") == month_label]
-    month_start = min(month_dates).strftime("%Y-%m-%d")
-    month_end = max(month_dates).strftime("%Y-%m-%d")
-    
-    print(f"Detected latest month: {month_label} ({len(month_dates)} trading days: {month_start} to {month_end})")
-    
-    # Load the monthly dataset
-    monthly_dataset = AllGraphDataSampler(
+    month_labels = sorted({d.strftime("%Y-%m") for d in dates})
+    if not month_labels:
+        raise ValueError("No months could be derived from pkl filenames.")
+
+    latest_month = month_labels[-1]
+
+    # Training month = t-7 (if available), else earliest
+    train_month_idx = max(0, len(month_labels) - 8)
+    train_month = month_labels[train_month_idx]
+
+    # Evaluation window = months t-6 .. t (or as many as available)
+    eval_months = month_labels[-7:] if len(month_labels) >= 7 else month_labels
+
+    def _month_dates(label):
+        return [d for d in dates if d.strftime("%Y-%m") == label]
+
+    train_month_dates = _month_dates(train_month)
+    if not train_month_dates:
+        raise ValueError(f"No data available for training month {train_month}")
+    train_start = min(train_month_dates).strftime("%Y-%m-%d")
+    train_end = max(train_month_dates).strftime("%Y-%m-%d")
+
+    eval_dates = [d for d in dates if d.strftime("%Y-%m") in eval_months]
+    if not eval_dates:
+        raise ValueError(f"No data available for evaluation window months={eval_months}")
+    eval_start = min(eval_dates).strftime("%Y-%m-%d")
+    eval_end = max(eval_dates).strftime("%Y-%m-%d")
+
+    print(f"Training month: {train_month} ({train_start} to {train_end})")
+    print(f"Evaluation window: {eval_months[0]} to {eval_months[-1]} ({eval_start} to {eval_end})")
+
+    # Load datasets
+    train_dataset = AllGraphDataSampler(
         base_dir=base_dir,
         date=True,
-        train_start_date=month_start,
-        train_end_date=month_end,
+        train_start_date=train_start,
+        train_end_date=train_end,
         mode="train",
     )
+    eval_dataset = AllGraphDataSampler(
+        base_dir=base_dir,
+        date=True,
+        train_start_date=eval_start,
+        train_end_date=eval_end,
+        mode="test",
+    )
 
-    if len(monthly_dataset) == 0:
-        raise ValueError(f"Monthly dataset for {month_label} is empty (start={month_start}, end={month_end})")
+    if len(train_dataset) == 0:
+        raise ValueError(f"Training dataset for {train_month} is empty (start={train_start}, end={train_end})")
+    if len(eval_dataset) == 0:
+        raise ValueError(f"Evaluation dataset for window {eval_months} is empty (start={eval_start}, end={eval_end})")
 
-    # Pad short lookback windows to the configured lookback
+    # Pad short lookback windows to the configured lookback for training (eval left untouched)
     target_lookback = getattr(args, "lookback", 30)
 
     def _pad_sample(sample):
@@ -397,23 +368,24 @@ def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buff
             sample["ts_features"] = ts_padded
         return sample
 
-    for i, sample in enumerate(monthly_dataset.data_all):
-        monthly_dataset.data_all[i] = _pad_sample(sample)
+    for i, sample in enumerate(train_dataset.data_all):
+        train_dataset.data_all[i] = _pad_sample(sample)
 
+    # We inject replay buffer into train dataset if provided
     if replay_buffer:
-        print(f"Injecting {len(replay_buffer)} samples from replay buffer into training data.")
+        print("Injecting replay buffer samples into training dataset...")
         padded_replay = [_pad_sample(s) for s in replay_buffer]
-        monthly_dataset.data_all.extend(padded_replay)
+        train_dataset.data_all.extend(padded_replay)
 
-    monthly_loader = DataLoader(
-        monthly_dataset,
-        batch_size=len(monthly_dataset),
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=len(train_dataset),
         pin_memory=True,
         collate_fn=lambda x: x,
         drop_last=True,
     )
 
-    env_init = create_env_init(args, data_loader=monthly_loader)
+    env_init = create_env_init(args, data_loader=train_loader)
     env_ref = env_init.envs[0] if hasattr(env_init, "envs") else env_init
     args.lookback = getattr(env_ref, "lookback", getattr(args, "lookback", 30))
     args.input_dim = getattr(env_ref, "feat_dim", getattr(args, "input_dim", 6))
@@ -429,7 +401,7 @@ def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buff
     if checkpoint_path is None:
         raise FileNotFoundError("No valid base checkpoint found for fine-tuning. Provide --resume_model_path or --baseline_checkpoint")
 
-    print(f"Fine-tuning {checkpoint_path} on month {month_label} ({month_start} to {month_end}) for {args.fine_tune_steps} timesteps")
+    print(f"Fine-tuning {checkpoint_path} using training month {train_month} ({train_start} to {train_end}) for {args.fine_tune_steps} timesteps")
 
     # Determine lookback
     lookback = getattr(env_init, 'lookback', getattr(args, 'lookback', 30))
@@ -482,11 +454,11 @@ def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buff
     new_replay_samples = []
     if getattr(args, "ptr_mode", False):
         # Select high-value samples from the current month to carry forward
-        new_replay_samples = select_replay_samples(model, env_init, monthly_dataset, k_percent=0.1)
+        new_replay_samples = select_replay_samples(model, env_init, train_dataset, k_percent=0.1)
 
     # save_dir already includes risk score (e.g., checkpoints_risk05/)
     os.makedirs(args.save_dir, exist_ok=True)
-    month_slug = month_label.replace("/", "-")
+    month_slug = latest_month.replace("/", "-")
     out_path = os.path.join(args.save_dir, f"{args.model_name}_{month_slug}.zip")
     model.save(out_path)
     print(f"Saved fine-tuned checkpoint to {out_path}")
@@ -497,20 +469,18 @@ def fine_tune_month(args, manifest_path=None, bookkeeping_path=None, replay_buff
     # Temporarily set test dates to the month's date range for model_predict
     original_test_start = getattr(args, 'test_start_date', None)
     original_test_end = getattr(args, 'test_end_date', None)
-    args.test_start_date = month_start
-    args.test_end_date = month_end
-
-    # Evaluate the fine-tuned model on the monthly data for promotion decision
-    print(f"Evaluating fine-tuned model for promotion gate...")
-    
-    # Temporarily set test dates to the month's date range for model_predict
-    original_test_start = getattr(args, 'test_start_date', None)
-    original_test_end = getattr(args, 'test_end_date', None)
-    args.test_start_date = month_start
-    args.test_end_date = month_end
+    args.test_start_date = eval_start
+    args.test_end_date = eval_end
     
     try:
-        final_eval = model_predict(args, model, monthly_loader, split="finetune_eval")
+        eval_loader = DataLoader(
+            eval_dataset,
+            batch_size=len(eval_dataset),
+            pin_memory=True,
+            collate_fn=lambda x: x,
+            drop_last=True,
+        )
+        final_eval = model_predict(args, model, eval_loader, split="finetune_eval")
     finally:
         # Restore original test dates
         args.test_start_date = original_test_start
@@ -640,16 +610,15 @@ if __name__ == '__main__':
     parser.add_argument("--save_dir", default="./checkpoints", help="Directory to save trained models")
     parser.add_argument("--baseline_checkpoint", default="./checkpoints/baseline.zip",
                         help="Destination checkpoint promoted after passing gating criteria")
-    parser.add_argument("--manifest", default=None, help="Path to monthly_manifest.json (defaults to dataset directory)")
     parser.add_argument("--promotion_min_sharpe", type=float, default=0.5,
                         help="Minimum Sharpe ratio required to promote a fine-tuned checkpoint")
     parser.add_argument("--promotion_max_drawdown", type=float, default=0.2,
                         help="Maximum acceptable drawdown (absolute fraction, e.g. 0.2 for 20%) for promotion")
     
     parser.add_argument("--run_monthly_fine_tune", action="store_true",
-                        help="Run monthly fine-tuning using the manifest instead of full training")
+                        help="Run monthly fine-tuning")
     parser.add_argument("--discover_months_with_pathway", action="store_true",
-                        help="When manifest lacks shards, group daily pickle files into monthly windows using Pathway")
+                        help="group daily pickle files into monthly windows using Pathway")
     parser.add_argument("--month_cutoff_days", type=int, default=None,
                         help="Optional cutoff (days) to drop late daily files when building monthly shards via Pathway")
     parser.add_argument("--min_month_days", type=int, default=10,
@@ -687,6 +656,7 @@ if __name__ == '__main__':
     parser.add_argument("--use_ptr", action="store_true", default=True, help="Backward-compatible alias for --ptr_mode")
     parser.add_argument("--ptr_memory_size", type=int, default=1000, help="Maximum number of samples retained in the PTR replay buffer")
     parser.add_argument("--ptr_priority_type", type=str, default="max", help="Replay buffer priority aggregation strategy")
+    parser.add_argument("stream", default=None, help="Pathway streaming flag")
 
     # Date ranges
     parser.add_argument("--train_start_date", default="2016-01-02", help="Start date for training")
