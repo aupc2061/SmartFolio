@@ -230,7 +230,10 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
         
         print(f"[SERVER] Creating StockPortfolioEnv...", flush=True)
         sys.stdout.flush()
-        
+        df_benchmark = pd.read_csv(f"./dataset_default/index_data/{req.market}_index.csv")
+        df_benchmark = df_benchmark[(df_benchmark['datetime'] >= req.test_start_date) &
+                                    (df_benchmark['datetime'] <= req.test_end_date)]
+        benchmark_return = df_benchmark['daily_return']
         env_test = StockPortfolioEnv(
             args=args_stub,
             corr=corr,
@@ -241,12 +244,12 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
             neg=neg,
             returns=labels,
             pyg_data=pyg_data,
-            benchmark_return=None,
             mode="test",
             ind_yn=req.ind_yn,
             pos_yn=req.pos_yn,
             neg_yn=req.neg_yn,
             risk_profile={"risk_score": req.risk_score},
+            benchmark_return=benchmark_return,
         )
 
         print(f"[SERVER] Environment created successfully", flush=True)
@@ -351,9 +354,9 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
 
     return {
         "metrics": records,
-        "weights_csv": str(weights_csv) if all_weights_data else None,
-        "portfolio_values_csv": str(portfolio_csv) if portfolio_value_data else None,
-        "portfolio_values_summary": portfolio_summary,
+        # "weights_csv": str(weights_csv) if all_weights_data else None,
+        # "portfolio_values_csv": str(portfolio_csv) if portfolio_value_data else None,
+        # "portfolio_values_summary": portfolio_summary,
         "final_portfolio_value": final_net_value,
         "peak_value": peak_value,
         "current_value": current_value,
@@ -519,7 +522,6 @@ def finetune(req: FinetuneRequest):
             expert_cache_path=None,
             irl_epochs=5,
             rl_timesteps=1,
-            risk_score=0.5,
             dd_base_weight=1.0,
             dd_risk_factor=1.0,
             market=req.market,

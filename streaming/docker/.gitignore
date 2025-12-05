@@ -1,0 +1,21 @@
+# Docker build artifacts
+*.pyc
+__pycache__/
+*.egg-info/
+.eggs/
+*.egg
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Local env files (use .env.example as template)
+.env.local
