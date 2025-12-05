@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -12,6 +13,7 @@ import torch
 from torch_geometric.loader import DataLoader
 from stable_baselines3 import PPO
 
+# Adjust path to find repo root
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -26,7 +28,6 @@ def _ensure_dir(path: Path) -> Path:
 
 
 def _call_policy_with_attention(policy_net, features_tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor] | None]:
-    """Normalize policy outputs to (logits, attn|None), handling legacy checkpoints."""
     output = policy_net(features_tensor, require_weights=True)
     if isinstance(output, tuple):
         if len(output) >= 2:
@@ -38,8 +39,6 @@ def _call_policy_with_attention(policy_net, features_tensor) -> Tuple[torch.Tens
 
 
 def process_data(batch: Dict[str, torch.Tensor], device: torch.device) -> Tuple[torch.Tensor, ...]:
-    """Align with trainer/irl_trainer.process_data."""
-
     def move(key: str):
         value = batch[key]
         if isinstance(value, torch.Tensor):
@@ -61,9 +60,15 @@ def process_data(batch: Dict[str, torch.Tensor], device: torch.device) -> Tuple[
 def auto_detect_metadata(args: argparse.Namespace) -> Dict[str, object]:
     """Infer dataset directory, number of stocks, and feature dimension."""
     base_dir = Path(args.data_root).expanduser().resolve()
-    data_dir = base_dir / f"data_train_predict_custom" / f"{args.horizon}_{args.relation_type}"
+    # UPDATED: Use args.market to construct path
+    data_dir = base_dir / f"data_train_predict_{args.market}" / f"{args.horizon}_{args.relation_type}"
     if not data_dir.is_dir():
-        raise FileNotFoundError(f"Dataset directory not found: {data_dir}")
+        # Fallback for legacy folder names if needed
+        alt_dir = base_dir / "data_train_predict_custom" / f"{args.horizon}_{args.relation_type}"
+        if alt_dir.is_dir():
+            data_dir = alt_dir
+        else:
+            raise FileNotFoundError(f"Dataset directory not found: {data_dir}")
 
     sample_files = sorted(p for p in data_dir.glob("*.pkl"))
     if not sample_files:
@@ -80,15 +85,14 @@ def auto_detect_metadata(args: argparse.Namespace) -> Dict[str, object]:
                 raise KeyError("missing 'features'")
 
             if isinstance(features, torch.Tensor):
-                feat_shape = tuple(features.shape)
-                if features.numel() == 0:
-                    raise ValueError("feature tensor is empty")
+                features_np = features.cpu().numpy()
             else:
                 features_np = np.asarray(features)
-                if features_np.size == 0:
-                    raise ValueError("feature array is empty")
-                feat_shape = features_np.shape
+            
+            if features_np.size == 0:
+                 raise ValueError("feature array is empty")
 
+            feat_shape = features_np.shape
             if len(feat_shape) < 2:
                 raise ValueError(f"feature tensor has shape {feat_shape}; expected >=2 dimensions")
 
@@ -98,7 +102,7 @@ def auto_detect_metadata(args: argparse.Namespace) -> Dict[str, object]:
                 raise ValueError(f"invalid feature dimensions: num_stocks={num_stocks}, input_dim={input_dim}")
 
             return {"data_dir": data_dir, "num_stocks": num_stocks, "input_dim": input_dim}
-        except Exception as exc:  # noqa: PERF203
+        except Exception as exc:
             last_error = exc
             continue
 
@@ -111,6 +115,7 @@ def auto_detect_metadata(args: argparse.Namespace) -> Dict[str, object]:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect PPO traces for latent factor experiments")
     parser.add_argument("--model-path", required=True, help="Path to trained PPO .zip file")
+    parser.add_argument("--market", default="custom", help="Market name (e.g. hs300, custom)")
     parser.add_argument("--horizon", default="1", help="Prediction horizon subdirectory")
     parser.add_argument("--relation-type", default="hy", help="Relation type subdirectory (e.g. hy)")
     parser.add_argument("--test-start-date", required=True, help="Test range start (YYYY-MM-DD)")
@@ -152,13 +157,11 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     print("Configuration:")
     print(f"  Model path  : {args.model_path}")
+    print(f"  Market      : {args.market}")
     print(f"  Dataset dir : {meta['data_dir']}")
     print(f"  Num stocks  : {args.num_stocks}")
     print(f"  Feature dim : {args.input_dim}")
     print(f"  Test range  : {args.test_start_date} to {args.test_end_date}")
-    print(f"  Output dir  : {output_dir}")
-    if args.save_attention:
-        print("  Attention   : saving per-step attention tensors")
 
     test_dataset = AllGraphDataSampler(
         base_dir=str(meta["data_dir"]),
@@ -173,8 +176,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     test_loader = DataLoader(test_dataset, batch_size=len(test_dataset), pin_memory=True)
 
     model_path = Path(args.model_path).expanduser()
-    if model_path.is_dir():
-        raise ValueError(f"Model path {model_path} is a directory; provide a specific checkpoint file")
     if not model_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {model_path}")
 
@@ -182,10 +183,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     model = PPO.load(str(model_path), env=None, device=args.device)
     device = torch.device(args.device)
     captured_activations = {}
-    
     def get_activation(name):
         def hook(model, input, output):
-            # output of PairNorm is [batch, num_stocks, hidden_dim]
             captured_activations[name] = output.detach()
         return hook
 
@@ -197,15 +196,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         print("Warning: Could not find 'pn' layer in policy_net. Activations will not be collected.")
         hook_handle = None
 
-    obs_buffer: List[np.ndarray] = []
-    activations_buffer: List[np.ndarray] = []  
-    logits_buffer: List[np.ndarray] = []
-    actions_buffer: List[np.ndarray] = []
-    rewards_buffer: List[float] = []
-    dones_buffer: List[bool] = []
-    attn_buffer: Dict[str, List[np.ndarray]] = {"industry": [], "positive": [], "negative": [], "semantic": []}
+    obs_buffer = []
+    activations_buffer = []
+    logits_buffer = []
+    actions_buffer = []
+    rewards_buffer = []
+    dones_buffer = []
+    attn_buffer = {"industry": [], "positive": [], "negative": [], "semantic": []}
 
-    lookback_seen: int | None = None
+    lookback_seen = None
 
     for batch_idx, batch in enumerate(test_loader):
         print(f"Processing batch {batch_idx + 1}/{len(test_loader)}")
@@ -231,7 +230,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         env.seed(args.seed)
         vec_env, obs = env.get_sb_env()
         vec_env.reset()
-
         lookback_seen = getattr(env, "lookback", lookback_seen)
 
         max_steps = returns.shape[0] if hasattr(returns, "shape") else len(returns)
@@ -244,9 +242,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 features_tensor = model.policy.extract_features(obs_tensor.to(device))
                 logits, attn = _call_policy_with_attention(model.policy.mlp_extractor.policy_net, features_tensor)
 
-            # Retrieve captured activation from hook
             if "embedding" in captured_activations:
-                # Shape: [1, num_stocks, hidden_dim] -> squeeze to [num_stocks, hidden_dim]
                 activations_buffer.append(captured_activations["embedding"].cpu().numpy()[0])
             
             action, _ = model.predict(obs, deterministic=args.deterministic)
@@ -267,7 +263,6 @@ def main(argv: Sequence[str] | None = None) -> None:
 
             if dones[0]:
                 break
-
         vec_env.close()
     
     if hook_handle:
@@ -296,7 +291,6 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     np.savez_compressed(data_path, **payload)
     print(f"Saved traces to {data_path}")
-    print(f"  Activations shape: {activations_arr.shape}")
 
     meta_payload = {
         "horizon": args.horizon,
@@ -304,12 +298,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         "num_stocks": args.num_stocks,
         "input_dim": args.input_dim,
         "lookback": lookback_seen,
-        "obs_dim": int(obs_arr.shape[1]) if obs_arr.ndim == 2 else None,
-        "activation_dim": int(activations_arr.shape[-1]) if activations_arr.ndim > 1 else None, # NEW
         "total_steps": int(obs_arr.shape[0]) if obs_arr.ndim >= 1 else 0,
         "model_path": args.model_path,
         "dataset_dir": str(meta["data_dir"]),
-        "max_steps": args.max_steps,
         "save_attention": args.save_attention,
     }
     with meta_path.open("w", encoding="utf-8") as fh:

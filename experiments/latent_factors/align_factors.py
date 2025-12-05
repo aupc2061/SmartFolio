@@ -9,8 +9,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from dataset import TraceDataset
-from model import SparseAutoencoder, TopKSparseAutoencoder, JumpReLUSparseAutoencoder
+from .dataset import TraceDataset
+from .model import SparseAutoencoder, TopKSparseAutoencoder, JumpReLUSparseAutoencoder
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

@@ -1,22 +1,41 @@
 import asyncio
 import os
-import sys
+from pathlib import Path
+
 from fastmcp import Client
 
-# Default arguments to use as a baseline
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def default_path(env_var: str, relative_path: str) -> str:
+    candidate = os.environ.get(env_var)
+    if candidate:
+        return candidate
+    return str((BASE_DIR / relative_path).resolve())
+
+
 DEFAULT_ARGS = {
-    "date": "2024-06-20",
-    "monthly_log_csv": "/home/arnav0103/github/SmartFolio/logs/monthly/2024-12/final_test_weights_20251128_015405.csv",
-    "model_path": "/home/arnav0103/github/SmartFolio/checkpoints/ppo_hgat_custom_20251128_015405.zip",
+    "date": "2024-12-26",
+    "monthly_log_csv": default_path(
+        "SMARTFOLIO_MONTHLY_LOG",
+        "logs/monthly/2024-12/final_test_weights_20251204_105206.csv",
+    ),
+    "model_path": default_path(
+        "SMARTFOLIO_MODEL_PATH",
+        "checkpoints_risk05/ppo_hgat_custom_20251204_105206.zip",
+    ),
     "market": "custom",
-    "data_root": "dataset_default",
+    "data_root": default_path("SMARTFOLIO_DATA_ROOT", "dataset_default"),
     "top_k": 5,
-    "lookback_days": 60,
+    "lookback_days": 30,
     "monthly_run_id": None,
-    "output_dir": "explainability_results",
-    "llm": True,
-    "llm_model": "gemini-2.0-flash"
+    "output_dir": default_path("SMARTFOLIO_OUTPUT_DIR", "explainability_results/latest_run"),
+    "llm": False,
+    "llm_model": "gpt-5-mini",
+    "latent": True,
 }
+
+SERVER_URL = os.environ.get("SMARTFOLIO_MCP_URL", "http://localhost:9123/mcp/")
 
 def get_user_input(current_args):
     """Prompts the user to override default arguments."""
@@ -62,7 +81,7 @@ async def run():
     print(" Connecting to SmartFolio MCP Server (Streamable HTTP)...")
     print("   Ensure 'python3 start_mcp.py' is running in another terminal!")
     
-    client = Client("http://localhost:9123/mcp/")
+    client = Client(SERVER_URL)
 
     async with client:
         print(" Server Connected!")

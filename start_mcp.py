@@ -3,8 +3,8 @@ import os
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# Importing from tools_mcp triggers the __init__.py which registers all the tools
-from tools_mcp import SmartFolioMCPServer
+# Importing from explainibility_agents.mcp registers all MCP tools
+from explainibility_agents.mcp import SmartFolioMCPServer
 
 if __name__ == "__main__":
     server = SmartFolioMCPServer(app_id="smartfolio-xai", transport="sse", port=9123)

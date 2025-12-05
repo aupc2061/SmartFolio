@@ -10,8 +10,8 @@ import torch
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, OneCycleLR
 from torch.utils.data import DataLoader, random_split
 
-from dataset import TraceDataset
-from model import (
+from .dataset import TraceDataset
+from .model import (
     SparseAutoencoder,
     TopKSparseAutoencoder,
     JumpReLUSparseAutoencoder,
