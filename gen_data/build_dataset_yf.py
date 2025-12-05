@@ -127,6 +127,12 @@ def fetch_ohlcv_streaming_csv(
     if tickers:
         df = df[df["kdcode"].isin(tickers)]
 
+    # Drop rows with missing OHLCV data (e.g., empty cells from streaming)
+    df = df.dropna(subset=["open", "high", "low", "close", "volume"])
+    
+    if df.empty:
+        return df
+
     df["dt"] = pd.to_datetime(df["dt"]).dt.strftime("%Y-%m-%d")
     df = df.sort_values(["kdcode", "dt"]).reset_index(drop=True)
 

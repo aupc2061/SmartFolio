@@ -42,9 +42,9 @@ class AllGraphDataSampler(data.Dataset):
                 si = self.date_to_idx(start_date)
                 ei = self.date_to_idx(end_date)
                 if si is None:
-                    si = 0
+                    si = 0  # fallback to first entry
                 if ei is None:
-                    ei = len(self.gnames_all) - 1
+                    ei = len(self.gnames_all) - 1  # fallback to last entry
                 if ei < si:
                     ei = si
                 return self.gnames_all[si:ei + 1]
@@ -111,11 +111,17 @@ class AllGraphDataSampler(data.Dataset):
         return self.data_all[idx]
 
     def date_to_idx(self, date):
-        result = None
+        """Return index of the first entry whose date prefix >= given date."""
+        if date is None:
+            return None
         for i in range(len(self.gnames_all)):
-            if date == self.gnames_all[i][:10]:
-                result = i
-        return result
+            try:
+                d = self.gnames_all[i][:10]
+            except Exception:
+                continue
+            if d >= date:
+                return i
+        return None
 
     def _load_manifest(self):
         if os.path.exists(self.manifest_path):

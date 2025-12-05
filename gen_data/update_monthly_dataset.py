@@ -37,6 +37,7 @@ try:
         FEATURE_COLS_NORM,
         cal_rolling_mean_std,
         fetch_ohlcv_yf,
+        fetch_ohlcv_streaming_csv,
         filter_code,
         gen_mats_by_threshold,
         get_label,
@@ -323,9 +324,19 @@ def fetch_latest_month_data(
     # Fetch from yfinance
     print(f"Downloading OHLCV for {len(tickers)} tickers...")
     if stream is not None:
-        mounth_tag = (next_start+timedelta(days=2)).strftime('%Y-%m')
-        mounth_csv_path = f'streaming/consumer/data/{mounth_tag}.csv'
-        df_raw = fetch_ohlcv_streaming_csv(tickers, month_csv_path=mounth_csv_path, lock=stream)
+        # Use the streaming output directory where StockBuffer.flush_to_csv() saves files
+        month_tag = (next_start + timedelta(days=2)).strftime('%Y-%m')
+        # Import streaming config for the correct path
+        try:
+            from streaming.config import MONTHLY_STOCK_DATA_DIR
+            month_csv_path = str(MONTHLY_STOCK_DATA_DIR / f"{month_tag}.csv")
+        except ImportError:
+            # Fallback to relative path from SmartFolio root
+            month_csv_path = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                "streaming", "output", "monthly_stock_data", f"{month_tag}.csv"
+            )
+        df_raw = fetch_ohlcv_streaming_csv(tickers, month_csv_path=month_csv_path, lock=stream)
     else:
         df_raw = fetch_ohlcv_yf(tickers, fetch_start, fetch_end)
     

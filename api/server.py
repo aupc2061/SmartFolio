@@ -177,7 +177,7 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
         base_dir="dataset_default"
     )
     date_keys = list(ticker_map.keys()) if ticker_map else []
-    
+
     model_path = Path(req.model_path).expanduser()
     if not model_path.exists():
         raise FileNotFoundError(f"Model checkpoint not found: {model_path}")

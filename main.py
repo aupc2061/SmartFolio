@@ -179,7 +179,11 @@ def load_finrag_prior(weights_path, num_stocks, tickers_csv="tickers.csv"):
 
 
 def init_policy_bias_from_prior(model, prior_weights):
-    
+    """
+    Initialize the policy action head bias so the mean action roughly matches the prior.
+    Works for SB3 ActorCriticPolicy subclasses where action_net is a Linear layer.
+    """
+
     if prior_weights is None:
         return
     policy = getattr(model, "policy", None)
@@ -200,7 +204,9 @@ def init_policy_bias_from_prior(model, prior_weights):
     print("Initialized policy action bias from FinRAG prior.")
 
 def select_replay_samples(model, env, dataset, k_percent=0.3):
-    
+    """    
+    Select top k% samples based on absolute reward magnitude (proxy for importance).
+    """
     print("Selecting replay samples...")
     obs = env.reset()
     rewards = []
@@ -230,7 +236,7 @@ def select_replay_samples(model, env, dataset, k_percent=0.3):
     print(f"Selected {len(selected_samples)} replay samples from {len(dataset)} total.")
     return selected_samples
 
-def fine_tune_month(args, bookkeeping_path=None, replay_buffer=None, fetch_new_data=True):
+def fine_tune_month(args, bookkeeping_path=None, replay_buffer=None, fetch_new_data=True, stream=None):
     """
     Fine-tune the PPO model on the latest month derived from pkl files in the data directory.
     
@@ -252,6 +258,9 @@ def fine_tune_month(args, bookkeeping_path=None, replay_buffer=None, fetch_new_d
     # Data directory containing daily pkl files
     base_dir = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
     
+    # Use stream parameter if provided, otherwise check args.stream
+    stream_lock = stream if stream is not None else getattr(args, "stream", None)
+
     # Optionally fetch new data from yfinance
     if fetch_new_data:
         try:
@@ -263,7 +272,7 @@ def fine_tune_month(args, bookkeeping_path=None, replay_buffer=None, fetch_new_d
                 relation_type=args.relation_type,
                 tickers_file=tickers_file,
                 lookback=getattr(args, "lookback", 30),
-                stream=args.stream
+                stream=stream_lock
             )
             print(f"Successfully fetched data for month: {fetched_month}")
         except Exception as e:
@@ -429,6 +438,7 @@ def fine_tune_month(args, bookkeeping_path=None, replay_buffer=None, fetch_new_d
             ptr_mode=False,
         )
         prior_policy = prior_model.policy
+        # Load the "current" (trainable new policy)
         model = load_weights_into_new_model(
             checkpoint_path,
             env_init,
@@ -500,6 +510,7 @@ def fine_tune_month(args, bookkeeping_path=None, replay_buffer=None, fetch_new_d
 
     return out_path, new_replay_samples
 
+
 def train_predict(args, predict_dt):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
     data_dir = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
@@ -555,6 +566,7 @@ def train_predict(args, predict_dt):
                         **PPO_PARAMS,
                         seed=args.seed,
                         device=args.device)
+    # Initialize policy bias with FinRAG prior if available
     init_policy_bias_from_prior(model, getattr(args, "finrag_prior", None))
     train_model_and_predict(model, args, train_loader, val_loader, test_loader)
 
@@ -656,7 +668,7 @@ if __name__ == '__main__':
     parser.add_argument("--use_ptr", action="store_true", default=True, help="Backward-compatible alias for --ptr_mode")
     parser.add_argument("--ptr_memory_size", type=int, default=1000, help="Maximum number of samples retained in the PTR replay buffer")
     parser.add_argument("--ptr_priority_type", type=str, default="max", help="Replay buffer priority aggregation strategy")
-    parser.add_argument("stream", default=None, help="Pathway streaming flag")
+    parser.add_argument("--stream", default=None, help="Pathway streaming flag/lock for reading streaming CSV")
 
     # Date ranges
     parser.add_argument("--train_start_date", default="2016-01-02", help="Start date for training")
