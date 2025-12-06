@@ -215,21 +215,35 @@ def save_daily_pkl(
     ts_features = []
     features = []
     labels = []
+    valid_codes_for_sample = []
     
     cols = FEATURE_COLS_NORM if norm else FEATURE_COLS
+    skipped_reasons = {"no_ts_data": 0, "ts_shape_mismatch": 0, "no_dt_data": 0}
     for code in codes:
         df_ts_code = df_ts[df_ts["kdcode"] == code]
         ts_array = df_ts_code[cols].values
         df_code_dt = df_ts_code[df_ts_code["dt"] == dt]
         array = df_code_dt[cols].values
         
-        if ts_array.shape[0] == lookback and array.shape[0] == 1:
-            ts_features.append(ts_array)
-            features.append(array[0])
-            label = df_ts_code.loc[df_ts_code["dt"] == dt]["label"].values
-            labels.append(label[0] if len(label) > 0 else 0.0)
+        if ts_array.shape[0] == 0:
+            skipped_reasons["no_ts_data"] += 1
+            continue
+        if ts_array.shape[0] != lookback:
+            skipped_reasons["ts_shape_mismatch"] += 1
+            continue
+        if array.shape[0] != 1:
+            skipped_reasons["no_dt_data"] += 1
+            continue
+            
+        ts_features.append(ts_array)
+        features.append(array[0])
+        valid_codes_for_sample.append(code)
+        label = df_ts_code.loc[df_ts_code["dt"] == dt]["label"].values
+        labels.append(label[0] if len(label) > 0 else 0.0)
     
     if not ts_features:
+        total_skipped = sum(skipped_reasons.values())
+        print(f"  Skipping {dt}: no valid features. Reasons: {skipped_reasons} (total codes: {len(codes)})")
         return False
     
     ts_features = torch.from_numpy(np.array(ts_features)).float()
@@ -318,7 +332,8 @@ def fetch_latest_month_data(
         raise FileNotFoundError(f"Tickers file not found: {tickers_file}")
     
     # We need extra history for lookback, so start earlier
-    fetch_start = (next_start - timedelta(days=lookback * 2)).strftime("%Y-%m-%d")
+    # Use 3x lookback in calendar days to account for weekends/holidays
+    fetch_start = (next_start - timedelta(days=lookback * 3)).strftime("%Y-%m-%d")
     fetch_end = next_end.strftime("%Y-%m-%d")
     
     # Fetch from yfinance
@@ -405,6 +420,7 @@ def run(args):
         lookback=getattr(args, 'lookback', 20),
         threshold=getattr(args, 'threshold', 0.5),
         norm=not getattr(args, 'disable_norm', False),
+        stream=None
     )
 
 
