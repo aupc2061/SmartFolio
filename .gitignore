@@ -2,6 +2,7 @@
 # These folders are large and should not be versioned
 
 dataset_default/
+display_data/
 dataset/
 
 # Python caches and compiled artifacts
