@@ -21,7 +21,8 @@ class ExplainabilityConfig:
     model_path: str
     market: str = "custom"
     data_root: str = "dataset_default"
-    top_k: int = 5
+    # None or non-positive -> include all tickers instead of top-K only
+    top_k: int | None = None
     lookback_days: int = 30
     llm: bool = False
     llm_model: str = "gpt-4.1-mini"

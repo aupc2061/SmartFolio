@@ -324,6 +324,85 @@ def _extract_attention_edges(summary: Dict[str, object], ticker: str) -> List[Di
     return edges
 
 
+# Token limit constants (approximate - 1 token ~= 4 chars for English text)
+MAX_PROMPT_TOKENS = 100000  # Safe limit for most LLMs
+CHARS_PER_TOKEN = 4
+MAX_PROMPT_CHARS = MAX_PROMPT_TOKENS * CHARS_PER_TOKEN
+
+
+def _estimate_tokens(text: str) -> int:
+    """Estimate token count from text (roughly 4 chars per token)."""
+    return len(text) // CHARS_PER_TOKEN
+
+
+def _truncate_text(text: str, max_chars: int, suffix: str = "\n\n[... truncated ...]") -> str:
+    """Truncate text to max_chars, adding suffix if truncated."""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars - len(suffix)] + suffix
+
+
+def _summarize_tree_entry(tree_entry: Optional[Dict[str, object]], max_rules_lines: int = 30) -> Dict[str, object]:
+    """Extract only essential information from tree entry to reduce token count."""
+    if not tree_entry:
+        return {}
+    
+    summary = {
+        "ticker": tree_entry.get("ticker"),
+        "r2_score": tree_entry.get("r2_score"),
+        "avg_weight": tree_entry.get("avg_weight"),
+    }
+    
+    # Truncate rules to first N lines
+    rules = tree_entry.get("rules", "")
+    if isinstance(rules, str) and rules.strip():
+        lines = rules.strip().splitlines()
+        if len(lines) > max_rules_lines:
+            summary["rules"] = "\n".join(lines[:max_rules_lines]) + f"\n[... {len(lines) - max_rules_lines} more lines truncated ...]"
+        else:
+            summary["rules"] = rules
+    
+    # Keep only top feature importances
+    feature_importances = tree_entry.get("feature_importances", {})
+    if isinstance(feature_importances, dict):
+        # Sort by importance and keep top 10
+        sorted_features = sorted(feature_importances.items(), key=lambda x: abs(float(x[1]) if x[1] else 0), reverse=True)[:10]
+        summary["top_feature_importances"] = dict(sorted_features)
+    elif isinstance(feature_importances, list):
+        summary["top_feature_importances"] = feature_importances[:10]
+    
+    return summary
+
+
+def _summarize_trading_markdown(markdown: str, max_chars: int = 8000) -> str:
+    """Extract key sections from trading markdown and truncate."""
+    if not markdown or len(markdown) <= max_chars:
+        return markdown
+    
+    # Try to keep header and summary sections
+    lines = markdown.split('\n')
+    result_lines = []
+    current_chars = 0
+    in_summary = False
+    
+    for line in lines:
+        if '## Unified Summary' in line or '## Summary' in line:
+            in_summary = True
+        elif line.startswith('## ') and in_summary:
+            in_summary = False
+        
+        # Always include headers and summary content
+        if line.startswith('#') or in_summary or current_chars < max_chars // 2:
+            result_lines.append(line)
+            current_chars += len(line) + 1
+            
+        if current_chars >= max_chars:
+            result_lines.append("\n[... content truncated for token limit ...]")
+            break
+    
+    return '\n'.join(result_lines)
+
+
 def _call_final_llm(prompt: str, model: str) -> str:
     import google.generativeai as genai
 
@@ -331,6 +410,13 @@ def _call_final_llm(prompt: str, model: str) -> str:
     if not key:
         raise RuntimeError("GOOGLE_API_KEY / GEMINI_API_KEY missing for final LLM synthesis")
     genai.configure(api_key=key)
+    
+    # Check and truncate prompt if needed
+    estimated_tokens = _estimate_tokens(prompt)
+    if estimated_tokens > MAX_PROMPT_TOKENS:
+        print(f"[WARN] Prompt has ~{estimated_tokens} tokens, truncating to ~{MAX_PROMPT_TOKENS}")
+        prompt = _truncate_text(prompt, MAX_PROMPT_CHARS)
+    
     llm = genai.GenerativeModel(model_name=model, system_instruction=FINAL_SYSTEM_PROMPT)
     resp = llm.generate_content(prompt, generation_config={"temperature": 0.35, "top_p": 0.9})
     text = getattr(resp, "text", None)
@@ -347,16 +433,34 @@ def _final_prompt_payload(
     trading_markdown: str,
     tree_entry: Optional[Dict[str, object]],
     attention_edges: List[Dict[str, object]],
+    max_total_chars: int = MAX_PROMPT_CHARS,
 ) -> str:
+    """Build prompt payload with token limit enforcement."""
+    
+    # Summarize/truncate each component
+    summarized_tree = _summarize_tree_entry(tree_entry, max_rules_lines=25)
+    summarized_markdown = _summarize_trading_markdown(trading_markdown, max_chars=6000)
+    
+    # Limit attention edges
+    limited_edges = attention_edges[:20] if attention_edges else []
+    
     payload = {
         "ticker": ticker,
         "as_of": as_of,
         "weight": weight,
-        "trading_agent_markdown": trading_markdown,
-        "tree_rules": tree_entry or {},
-        "attention_edges": attention_edges,
+        "trading_agent_summary": summarized_markdown,
+        "tree_rules_summary": summarized_tree,
+        "attention_edges": limited_edges,
     }
-    return json.dumps(payload, indent=2, default=str)
+    
+    result = json.dumps(payload, indent=2, default=str)
+    
+    # Final safety truncation
+    if len(result) > max_total_chars:
+        print(f"[WARN] Final prompt payload ({len(result)} chars) exceeds limit, truncating")
+        result = _truncate_text(result, max_total_chars)
+    
+    return result
 
 
 def _fallback_final_summary(ticker: str, trading_points: List[str], tree_entry: Optional[Dict[str, object]]) -> str:

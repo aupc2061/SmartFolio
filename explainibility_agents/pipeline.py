@@ -16,6 +16,15 @@ import pandas as pd  # type: ignore[import]
 from langchain_core.prompts import ChatPromptTemplate  # type: ignore[import]
 from langgraph.graph import END, StateGraph  # type: ignore[import]
 
+# Token limit constants (approximate - 1 token ~= 4 chars for English text)
+MAX_PROMPT_TOKENS = 60000  # Safe limit for OpenAI models
+CHARS_PER_TOKEN = 4
+MAX_PROMPT_CHARS = MAX_PROMPT_TOKENS * CHARS_PER_TOKEN
+MAX_RULES_LINES = 25
+MAX_FEATURE_IMPORTANCES = 10
+MAX_STOCKS_IN_PROMPT = 10
+MAX_TRADING_MARKDOWN_CHARS = 4000
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -48,7 +57,9 @@ Return per ticker sections that look like this:
 
 FINAL_SYSTEM_PROMPT = (
     "You are a senior portfolio strategist. Combine fundamental takeaways, tree-based rules, and latent factor flags "
-    "into one concise note per stock. Use at most three short bullet points (under 120 total words) per ticker and never offer services, monitoring, or extra actions."
+    "into one concise note per stock. Respond with a single JSON object only, no markdown or prose outside JSON. "
+    "Required keys: ticker (string), as_of (string), weight_pct (string), summary_bullets (array of <=3 short strings), "
+    "trading_rationale (string), tree_hint (string), latent_notes (string). Keep text under 120 total words."
 )
 
 
@@ -69,11 +80,145 @@ FINAL_PROMPT = ChatPromptTemplate.from_messages(
             "human",
             "Ticker: {ticker}\nWeight: {weight}\nAs Of: {as_of}\n"
             "Trading Agent Markdown:\n{trading_markdown}\n\n"
-            "Tree Signal Summary:\n{tree_rules}\n\nLatent Notes:\n{latent_notes}\n",
+            "Tree Signal Summary:\n{tree_rules}\n\nLatent Notes:\n{latent_notes}\n\n"
+            "Return JSON only.",
         ),
     ]
 )
 
+
+# ============================================================================
+# TOKEN LIMITING HELPER FUNCTIONS
+# ============================================================================
+
+def _estimate_tokens(text: str) -> int:
+    """Estimate token count from text (roughly 4 chars per token)."""
+    return len(text) // CHARS_PER_TOKEN
+
+
+def _truncate_text(text: str, max_chars: int, suffix: str = "\n[... truncated ...]") -> str:
+    """Truncate text to max_chars, adding suffix if truncated."""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars - len(suffix)] + suffix
+
+
+def _summarize_per_stock_entry(entry: Dict) -> Dict:
+    """Summarize a single stock's tree data to reduce token count."""
+    summary = {
+        "ticker": entry.get("ticker"),
+        "r2_score": entry.get("r2_score"),
+        "avg_weight": entry.get("avg_weight"),
+    }
+    
+    # Truncate rules to first N lines
+    rules = entry.get("rules", "")
+    if isinstance(rules, str) and rules.strip():
+        lines = rules.strip().splitlines()
+        if len(lines) > MAX_RULES_LINES:
+            summary["rules"] = "\n".join(lines[:MAX_RULES_LINES]) + f"\n[... {len(lines) - MAX_RULES_LINES} more lines omitted ...]"
+        else:
+            summary["rules"] = rules
+    
+    # Keep only top feature importances
+    feature_importances = entry.get("feature_importances", {})
+    if isinstance(feature_importances, dict):
+        sorted_features = sorted(
+            feature_importances.items(), 
+            key=lambda x: abs(float(x[1]) if x[1] else 0), 
+            reverse=True
+        )[:MAX_FEATURE_IMPORTANCES]
+        summary["top_features"] = dict(sorted_features)
+    elif isinstance(feature_importances, list):
+        summary["top_features"] = feature_importances[:MAX_FEATURE_IMPORTANCES]
+    
+    return summary
+
+
+def _summarize_tree_payload(payload: Dict) -> Dict:
+    """Create a token-efficient summary of the tree explainability payload."""
+    if not isinstance(payload, dict):
+        return payload
+    
+    summarized = {}
+    
+    # Copy simple scalar values
+    for key in ["global_r2", "X_shape", "Y_shape", "market", "model_path"]:
+        if key in payload:
+            summarized[key] = payload[key]
+    
+    # Summarize avg_weights (keep top stocks only)
+    avg_weights = payload.get("avg_weights", {})
+    if isinstance(avg_weights, dict):
+        sorted_weights = sorted(avg_weights.items(), key=lambda x: float(x[1]) if x[1] else 0, reverse=True)
+        summarized["top_avg_weights"] = dict(sorted_weights[:MAX_STOCKS_IN_PROMPT])
+    
+    # Summarize per_stock (the main data that causes token explosion)
+    per_stock = payload.get("per_stock", {})
+    if isinstance(per_stock, dict):
+        # Sort by avg_weight and take top stocks
+        stock_items = list(per_stock.items())
+        stock_items.sort(
+            key=lambda x: float(x[1].get("avg_weight", 0)) if isinstance(x[1], dict) else 0,
+            reverse=True
+        )
+        
+        summarized_per_stock = {}
+        for ticker, entry in stock_items[:MAX_STOCKS_IN_PROMPT]:
+            if isinstance(entry, dict):
+                summarized_per_stock[ticker] = _summarize_per_stock_entry(entry)
+        
+        summarized["per_stock"] = summarized_per_stock
+        
+        if len(stock_items) > MAX_STOCKS_IN_PROMPT:
+            summarized["_note"] = f"Showing top {MAX_STOCKS_IN_PROMPT} of {len(stock_items)} stocks by weight"
+    
+    return summarized
+
+
+def _summarize_trading_markdown(markdown: str) -> str:
+    """Extract key sections from trading markdown and truncate."""
+    if not markdown or len(markdown) <= MAX_TRADING_MARKDOWN_CHARS:
+        return markdown
+    
+    # Try to keep header and summary sections
+    lines = markdown.split('\n')
+    result_lines = []
+    current_chars = 0
+    in_summary = False
+    
+    for line in lines:
+        if '## Unified Summary' in line or '## Summary' in line:
+            in_summary = True
+        elif line.startswith('## ') and in_summary:
+            in_summary = False
+        
+        # Always include headers and summary content
+        if line.startswith('#') or in_summary or current_chars < MAX_TRADING_MARKDOWN_CHARS // 2:
+            result_lines.append(line)
+            current_chars += len(line) + 1
+            
+        if current_chars >= MAX_TRADING_MARKDOWN_CHARS:
+            result_lines.append("\n[... content truncated for token limit ...]")
+            break
+    
+    return '\n'.join(result_lines)
+
+
+def _summarize_tree_rules(rules_text: str) -> str:
+    """Truncate tree rules to manageable size."""
+    if not rules_text or len(rules_text) <= 3000:
+        return rules_text
+    
+    lines = rules_text.strip().splitlines()
+    if len(lines) > MAX_RULES_LINES:
+        return "\n".join(lines[:MAX_RULES_LINES]) + f"\n[... {len(lines) - MAX_RULES_LINES} more rule lines omitted ...]"
+    return rules_text
+
+
+# ============================================================================
+# CORE PIPELINE FUNCTIONS
+# ============================================================================
 
 def rolling_window(date_str: str, lookback_days: int) -> Tuple[str, str]:
     if lookback_days <= 0:
@@ -87,7 +232,7 @@ def top_k_for_date_from_log(
     monthly_log_csv: Path,
     target_date: str,
     *,
-    top_k: int = 5,
+    top_k: int | None = None,
     run_id: str | None = None,
 ) -> List[dict]:
     df = pd.read_csv(monthly_log_csv)
@@ -108,7 +253,9 @@ def top_k_for_date_from_log(
         if mask.any():
             filtered = df[mask].copy()
             filtered["as_of"] = series[mask].dt.strftime("%Y-%m-%d")
-            filtered = filtered.sort_values("weight", ascending=False).head(top_k)
+            filtered = filtered.sort_values("weight", ascending=False)
+            if top_k and top_k > 0:
+                filtered = filtered.head(top_k)
             return filtered.to_dict(orient="records")
 
     raise RuntimeError(f"No holdings found for target date {target_date} in {monthly_log_csv}")
@@ -138,6 +285,7 @@ def run_explain_tree_module(
     end_date: str,
     out_dir: Path,
 ) -> Path:
+    top_k_arg = cfg.top_k if cfg.top_k and cfg.top_k > 0 else 0
     argv = [
         "--model-path",
         str(cfg.model_path),
@@ -156,7 +304,7 @@ def run_explain_tree_module(
         "--output-dir",
         str(out_dir),
         "--top-k-stocks",
-        str(cfg.top_k),
+        str(top_k_arg),
         "--focus-log-csv",
         str(cfg.monthly_log_csv),
         "--focus-date",
@@ -186,7 +334,18 @@ def generate_tree_narrative(
     if not isinstance(payload, dict):
         raise RuntimeError("Tree snapshot must contain a dict")
 
-    prompt_payload = json.dumps(payload, indent=2, default=str)
+    # Summarize the payload to reduce token count
+    summarized_payload = _summarize_tree_payload(payload)
+    prompt_payload = json.dumps(summarized_payload, indent=2, default=str)
+    
+    # Check token count
+    estimated_tokens = _estimate_tokens(prompt_payload)
+    print(f"[INFO] Tree narrative prompt: ~{estimated_tokens} tokens ({len(prompt_payload)} chars)")
+    
+    if estimated_tokens > MAX_PROMPT_TOKENS:
+        print(f"[WARN] Tree payload exceeds {MAX_PROMPT_TOKENS} tokens, truncating...")
+        prompt_payload = _truncate_text(prompt_payload, MAX_PROMPT_CHARS)
+    
     prompt_path = out_dir / "tree_prompt_payload.json"
     prompt_path.write_text(prompt_payload, encoding="utf-8")
 
@@ -290,15 +449,74 @@ def _format_tree_rules(entry: Optional[Dict[str, object]]) -> str:
         return "Tree surrogate signal unavailable."
     rules_obj = entry.get("rules")
     if isinstance(rules_obj, str) and rules_obj.strip():
-        return rules_obj.strip()
-    return json.dumps(entry, indent=2, default=str)
+        # Apply truncation to rules
+        return _summarize_tree_rules(rules_obj.strip())
+    # Summarize the entry before JSON dump
+    summarized = _summarize_per_stock_entry(entry) if isinstance(entry, dict) else entry
+    result = json.dumps(summarized, indent=2, default=str)
+    return _truncate_text(result, 3000)
 
 
 def _read_trading_markdown(path: str) -> str:
     try:
-        return Path(path).read_text(encoding="utf-8")
+        content = Path(path).read_text(encoding="utf-8")
+        # Apply truncation to trading markdown
+        return _summarize_trading_markdown(content)
     except FileNotFoundError:
         return "Trading agent markdown missing."
+
+
+def _as_string_list(values: object) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
+def _coerce_json_report(
+    raw_output: str,
+    *,
+    ticker: str,
+    weight: float,
+    as_of: Optional[str],
+    trading_points: List[str],
+    tree_hint: str,
+    latent_notes: str,
+) -> Dict[str, object]:
+    base_payload: Dict[str, object] = {
+        "ticker": ticker,
+        "as_of": as_of or "n/a",
+        "weight": weight,
+        "weight_pct": f"{weight*100:.2f}%",
+        "trading_rationale": "\n".join(trading_points) if trading_points else "",
+        "tree_hint": tree_hint,
+        "latent_notes": latent_notes,
+    }
+
+    try:
+        parsed = json.loads(raw_output)
+    except json.JSONDecodeError:
+        parsed = None
+
+    if isinstance(parsed, dict):
+        base_payload.update(
+            {
+                "summary_bullets": _as_string_list(
+                    parsed.get("summary_bullets")
+                    or parsed.get("takeaways")
+                    or parsed.get("bullets")
+                )
+                or trading_points
+                or [],
+                "trading_rationale": str(parsed.get("trading_rationale") or base_payload["trading_rationale"]),
+                "tree_hint": str(parsed.get("tree_hint") or tree_hint),
+                "latent_notes": str(parsed.get("latent_notes") or latent_notes),
+            }
+        )
+        return base_payload
+
+    base_payload["summary_bullets"] = trading_points or [raw_output]
+    base_payload["raw_output"] = raw_output
+    return base_payload
 
 
 def build_final_reports(
@@ -318,7 +536,10 @@ def build_final_reports(
     for holding in holdings:
         trade = rows_by_ticker.get(holding.ticker)
         tree_entry = tree_per_stock.get(holding.ticker)
-        latent_notes = str(latent_summary or "Latent factors disabled.")
+        # Truncate latent notes to avoid token explosion
+        latent_notes = _truncate_text(str(latent_summary or "Latent factors disabled."), 2000)
+        trading_points = _as_string_list(trade.get("summary_points")) if trade else []
+        tree_hint = _format_tree_rules(tree_entry)
 
         if llm and trade and trade.get("success"):
             prompt_value = FINAL_PROMPT.format_prompt(
@@ -326,24 +547,41 @@ def build_final_reports(
                 weight=f"{holding.weight*100:.2f}%",
                 as_of=holding.as_of or "n/a",
                 trading_markdown=_read_trading_markdown(str(trade["output_path"])),
-                tree_rules=_format_tree_rules(tree_entry),
+                tree_rules=tree_hint,
                 latent_notes=latent_notes,
             )
             response = llm.invoke(prompt_value.to_messages())
             content = response.content if hasattr(response, "content") else str(response)
-            results.append({"ticker": holding.ticker, "success": True, "output": content, "llm_used": True})
+            payload = _coerce_json_report(
+                content,
+                ticker=holding.ticker,
+                weight=holding.weight,
+                as_of=holding.as_of,
+                trading_points=trading_points,
+                tree_hint=tree_hint,
+                latent_notes=latent_notes,
+            )
+            results.append(
+                {
+                    "ticker": holding.ticker,
+                    "success": True,
+                    "llm_used": True,
+                    "report": payload,
+                    "raw_output": content,
+                }
+            )
             continue
 
-        fallback_parts = [f"Summary for {holding.ticker}."]
-        if trade and trade.get("success"):
-            raw_points = trade.get("summary_points") or []
-            points = [str(point) for point in raw_points if point]
-            if points:
-                fallback_parts.append("Key takeaways: " + "; ".join(points))
-        if tree_entry:
-            fallback_parts.append("Tree hint: " + _format_tree_rules(tree_entry).splitlines()[0])
-        fallback_parts.append(latent_notes)
-        results.append({"ticker": holding.ticker, "success": True, "output": " ".join(fallback_parts), "llm_used": False})
+        fallback_report = _coerce_json_report(
+            " ".join(trading_points) if trading_points else "Final synthesis fallback",
+            ticker=holding.ticker,
+            weight=holding.weight,
+            as_of=holding.as_of,
+            trading_points=trading_points,
+            tree_hint=tree_hint,
+            latent_notes=latent_notes,
+        )
+        results.append({"ticker": holding.ticker, "success": True, "llm_used": False, "report": fallback_report})
     return results
 
 
@@ -391,13 +629,49 @@ def write_final_markdown(
         final = final_map.get(holding.ticker)
         if final and final.get("success"):
             tag = "LLM" if final.get("llm_used") else "Fallback"
-            lines.append(f"**Final Synthesis ({tag})**\n{final.get('output')}")
+            report = final.get("report") or {}
+            bullets = report.get("summary_bullets") or []
+            lines.append(f"**Final Synthesis ({tag})**")
+            if bullets:
+                for bullet in bullets:
+                    lines.append(f"- {bullet}")
+            else:
+                lines.append(str(report.get("trading_rationale") or report.get("raw_output") or "n/a"))
+            lines.append(f"Tree hint: {report.get('tree_hint','')}")
+            lines.append(f"Latent notes: {report.get('latent_notes','')}")
         elif final:
             lines.append(f"Final synthesis failed: {final.get('error','unknown')}")
         else:
             lines.append("Final synthesis unavailable.")
 
     destination.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_final_json(
+    cfg: ExplainabilityConfig,
+    holdings: List[Holding],
+    trading_rows: List[Dict[str, object]],
+    final_reports: List[Dict[str, object]],
+    tree_snapshot: Optional[Path],
+    tree_text: Optional[str],
+    latent_result: Optional[Dict[str, object]],
+    destination: Path,
+) -> None:
+    payload = {
+        "date": cfg.date,
+        "market": cfg.market,
+        "model_path": cfg.model_path,
+        "lookback_days": cfg.lookback_days,
+        "holdings": [asdict(h) for h in holdings],
+        "trading_agents": trading_rows,
+        "final_reports": final_reports,
+        "tree": {
+            "snapshot": str(tree_snapshot) if tree_snapshot and tree_snapshot.exists() else None,
+            "narrative_md": tree_text,
+        },
+        "latent_result": latent_result,
+    }
+    destination.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
 
 def write_index_file(
@@ -409,6 +683,7 @@ def write_index_file(
     tree_narrative: Optional[Path],
     latent_result: Optional[Dict[str, object]],
     final_markdown: Path,
+    final_json: Path,
     destination: Path,
 ) -> None:
     index = {
@@ -424,6 +699,7 @@ def write_index_file(
             "tree_snapshot": str(tree_snapshot) if tree_snapshot and tree_snapshot.exists() else None,
             "tree_narrative": str(tree_narrative) if tree_narrative else None,
             "final_markdown": str(final_markdown),
+            "final_json": str(final_json),
         },
     }
     destination.write_text(json.dumps(index, indent=2), encoding="utf-8")
@@ -534,6 +810,7 @@ def run_explainibility_pipeline(cfg: ExplainabilityConfig) -> PipelineState:
         latent_text = final_state["latent_result"].get("summary_md")
 
     final_md_path = out_dir / "explainability_final_results.md"
+    final_json_path = out_dir / "explainability_final_results.json"
     write_final_markdown(
         cfg,
         final_state.get("holdings", []),
@@ -542,6 +819,17 @@ def run_explainibility_pipeline(cfg: ExplainabilityConfig) -> PipelineState:
         final_state.get("trading_rows", []),
         final_state.get("final_reports", []),
         final_md_path,
+    )
+
+    write_final_json(
+        cfg,
+        final_state.get("holdings", []),
+        final_state.get("trading_rows", []),
+        final_state.get("final_reports", []),
+        final_state.get("tree_snapshot"),
+        tree_text,
+        final_state.get("latent_result"),
+        final_json_path,
     )
 
     index_path = out_dir / "orchestrator_index.json"
@@ -554,9 +842,11 @@ def run_explainibility_pipeline(cfg: ExplainabilityConfig) -> PipelineState:
         final_state.get("tree_narrative_path"),
         final_state.get("latent_result"),
         final_md_path,
+        final_json_path,
         index_path,
     )
 
     final_state["final_markdown"] = final_md_path
+    final_state["final_json"] = final_json_path
     final_state["index_path"] = index_path
     return final_state

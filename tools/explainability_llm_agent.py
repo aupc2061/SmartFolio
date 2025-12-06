@@ -7,6 +7,14 @@ import numpy as np
 import joblib
 import google.generativeai as genai
 
+# Token limit constants
+MAX_PROMPT_TOKENS = 100000  # Safe limit for most LLMs
+CHARS_PER_TOKEN = 4
+MAX_PROMPT_CHARS = MAX_PROMPT_TOKENS * CHARS_PER_TOKEN
+MAX_RULES_LINES_PER_STOCK = 20
+MAX_FEATURE_IMPORTANCES = 8
+MAX_STOCKS_IN_PROMPT = 10
+
 SYSTEM_PROMPT = ("""
 You are a Financial Analyst writing a simplified newsletter for retail investors. Your goal is to explain an AI's trading strategy in plain English, removing all technical jargon.
 
@@ -80,6 +88,89 @@ def convert_keys_to_str(obj):
     else:
         return safe_convert(obj)
 
+
+def _estimate_tokens(text: str) -> int:
+    """Estimate token count from text (roughly 4 chars per token)."""
+    return len(text) // CHARS_PER_TOKEN
+
+
+def _truncate_text(text: str, max_chars: int, suffix: str = "\n[... truncated ...]") -> str:
+    """Truncate text to max_chars, adding suffix if truncated."""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars - len(suffix)] + suffix
+
+
+def _summarize_per_stock_entry(entry: Dict, max_rules_lines: int = MAX_RULES_LINES_PER_STOCK) -> Dict:
+    """Summarize a single stock's tree data to reduce token count."""
+    summary = {
+        "ticker": entry.get("ticker"),
+        "r2_score": entry.get("r2_score"),
+        "avg_weight": entry.get("avg_weight"),
+    }
+    
+    # Truncate rules to first N lines
+    rules = entry.get("rules", "")
+    if isinstance(rules, str) and rules.strip():
+        lines = rules.strip().splitlines()
+        if len(lines) > max_rules_lines:
+            summary["rules"] = "\n".join(lines[:max_rules_lines]) + f"\n[... {len(lines) - max_rules_lines} more rule lines omitted ...]"
+        else:
+            summary["rules"] = rules
+    
+    # Keep only top feature importances
+    feature_importances = entry.get("feature_importances", {})
+    if isinstance(feature_importances, dict):
+        sorted_features = sorted(
+            feature_importances.items(), 
+            key=lambda x: abs(float(x[1]) if x[1] else 0), 
+            reverse=True
+        )[:MAX_FEATURE_IMPORTANCES]
+        summary["top_features"] = dict(sorted_features)
+    elif isinstance(feature_importances, list):
+        summary["top_features"] = feature_importances[:MAX_FEATURE_IMPORTANCES]
+    
+    return summary
+
+
+def _summarize_filtered_data(data: Dict) -> Dict:
+    """Create a token-efficient summary of the explainability data."""
+    summarized = {}
+    
+    # Copy simple scalar values
+    for key in ["global_r2", "X_shape", "Y_shape"]:
+        if key in data:
+            summarized[key] = data[key]
+    
+    # Summarize avg_weights (keep top stocks only)
+    avg_weights = data.get("avg_weights", {})
+    if isinstance(avg_weights, dict):
+        sorted_weights = sorted(avg_weights.items(), key=lambda x: float(x[1]) if x[1] else 0, reverse=True)
+        summarized["top_avg_weights"] = dict(sorted_weights[:MAX_STOCKS_IN_PROMPT])
+    
+    # Summarize per_stock (the main data that causes token explosion)
+    per_stock = data.get("per_stock", {})
+    if isinstance(per_stock, dict):
+        # Sort by avg_weight and take top stocks
+        stock_items = list(per_stock.items())
+        stock_items.sort(
+            key=lambda x: float(x[1].get("avg_weight", 0)) if isinstance(x[1], dict) else 0,
+            reverse=True
+        )
+        
+        summarized_per_stock = {}
+        for ticker, entry in stock_items[:MAX_STOCKS_IN_PROMPT]:
+            if isinstance(entry, dict):
+                summarized_per_stock[ticker] = _summarize_per_stock_entry(entry)
+        
+        summarized["per_stock"] = summarized_per_stock
+        
+        if len(stock_items) > MAX_STOCKS_IN_PROMPT:
+            summarized["_note"] = f"Showing top {MAX_STOCKS_IN_PROMPT} of {len(stock_items)} stocks by weight"
+    
+    return summarized
+
+
 def load_snapshot(path: Path) -> SnapshotContext:
     if not path.exists():
         raise FileNotFoundError(f"Snapshot not found: {path}")
@@ -93,9 +184,11 @@ def load_snapshot(path: Path) -> SnapshotContext:
     meta = {"model_path": str(path), "included_keys": list(filtered.keys())}
     return SnapshotContext(metadata=meta, filtered_data=filtered)
 
+
 def assemble_prompt(ctx: SnapshotContext) -> str:
     """
     Builds a structured Gemini-optimized prompt emphasizing narrative over data.
+    Token-limited to prevent context length errors.
     """
 
     example_block = (
@@ -115,22 +208,42 @@ def assemble_prompt(ctx: SnapshotContext) -> str:
         "Ignore the 'avg_weight' field completely in your output.\n"
     )
 
+    # Summarize the data to reduce token count
+    summarized_data = _summarize_filtered_data(ctx.filtered_data)
+
     payload = {
         "system_instruction": SYSTEM_PROMPT,
         "metadata": ctx.metadata,
         "instructions": instructions,
         "example_output": example_block,
-        "explainability_data": ctx.filtered_data,
+        "explainability_data": summarized_data,
     }
-    print(payload)
+    
+    result = json.dumps(convert_keys_to_str(payload), indent=2, default=safe_convert)
+    
+    # Check token count and warn/truncate if needed
+    estimated_tokens = _estimate_tokens(result)
+    print(f"[INFO] Assembled prompt: ~{estimated_tokens} tokens ({len(result)} chars)")
+    
+    if estimated_tokens > MAX_PROMPT_TOKENS:
+        print(f"[WARN] Prompt exceeds {MAX_PROMPT_TOKENS} token limit, truncating...")
+        result = _truncate_text(result, MAX_PROMPT_CHARS)
+        print(f"[INFO] Truncated to {len(result)} chars (~{_estimate_tokens(result)} tokens)")
 
-    return json.dumps(convert_keys_to_str(payload), indent=2, default=safe_convert)
+    return result
 
 def llm_narrative(prompt: str, model="gemini-2.0-flash", retries=3, delay=4) -> str:
     key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not key:
         raise RuntimeError("Missing GOOGLE_API_KEY / GEMINI_API_KEY.")
     genai.configure(api_key=key)
+    
+    # Final token check before sending to LLM
+    estimated_tokens = _estimate_tokens(prompt)
+    if estimated_tokens > MAX_PROMPT_TOKENS:
+        print(f"[WARN] Prompt has ~{estimated_tokens} tokens, applying final truncation")
+        prompt = _truncate_text(prompt, MAX_PROMPT_CHARS)
+    
     llm = genai.GenerativeModel(model_name=model, system_instruction=SYSTEM_PROMPT)
 
     for attempt in range(1, retries + 1):
@@ -146,6 +259,11 @@ def llm_narrative(prompt: str, model="gemini-2.0-flash", retries=3, delay=4) -> 
             if "429" in msg and attempt < retries:
                 print(f"[WARN] Rate limited (429). Retrying in {delay}s…")
                 time.sleep(delay)
+                continue
+            # Check if it's a token limit error and try with more aggressive truncation
+            if "token" in msg.lower() and "limit" in msg.lower() and attempt < retries:
+                print(f"[WARN] Token limit exceeded, reducing prompt size and retrying...")
+                prompt = _truncate_text(prompt, MAX_PROMPT_CHARS // 2)
                 continue
             print(f"[ERROR] Gemini call failed: {e}")
             return f"**LLM generation failed:** {e}"

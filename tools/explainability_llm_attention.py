@@ -19,6 +19,25 @@ from pathlib import Path
 import numpy as np
 import google.generativeai as genai
 
+# Token limit constants
+MAX_PROMPT_TOKENS = 100000
+CHARS_PER_TOKEN = 4
+MAX_PROMPT_CHARS = MAX_PROMPT_TOKENS * CHARS_PER_TOKEN
+MAX_EDGES_PER_RELATION = 15
+
+
+def _estimate_tokens(text: str) -> int:
+    """Estimate token count from text (roughly 4 chars per token)."""
+    return len(text) // CHARS_PER_TOKEN
+
+
+def _truncate_text(text: str, max_chars: int, suffix: str = "\n[... truncated ...]") -> str:
+    """Truncate text to max_chars, adding suffix if truncated."""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars - len(suffix)] + suffix
+
+
 SYSTEM_PROMPT = (
     "You are a quantitative explainability analyst specializing in graph-based models. "
     "You will analyze the HGAT (Hierarchical Graph Attention Network) explainability summary "
@@ -26,6 +45,18 @@ SYSTEM_PROMPT = (
     "Your goal is to interpret semantic attention weights, inter-stock relationships, "
     "and cross-stock influence patterns clearly and concisely for a technical audience."
 )
+
+
+def _estimate_tokens(text: str) -> int:
+    """Estimate token count from text."""
+    return len(text) // CHARS_PER_TOKEN
+
+
+def _truncate_text(text: str, max_chars: int, suffix: str = "\n[... truncated ...]") -> str:
+    """Truncate text to max_chars."""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars - len(suffix)] + suffix
 
 def parse_args():
     p = argparse.ArgumentParser(description="Explain HGAT attention summary JSON using Gemini 2.0 Flash.")
@@ -68,6 +99,15 @@ def load_attention_summary(attention_path: Path):
     else:
         attn = data
 
+    # Limit top_edges to reduce token count
+    top_edges = attn.get("top_edges", {})
+    limited_edges = {}
+    for relation, edges in top_edges.items():
+        if isinstance(edges, list):
+            limited_edges[relation] = edges[:MAX_EDGES_PER_RELATION]
+        else:
+            limited_edges[relation] = edges
+
     # compress large arrays for readability
     summary = {
         "model_path": attn.get("model_path", ""),
@@ -75,7 +115,7 @@ def load_attention_summary(attention_path: Path):
         "num_stocks": attn.get("num_stocks", ""),
         "semantic_labels": attn.get("semantic_labels", []),
         "semantic_mean": attn.get("semantic_mean", []),
-        "top_edges": attn.get("top_edges", {}),
+        "top_edges": limited_edges,
     }
 
     if "avg_allocations" in attn:
@@ -157,6 +197,12 @@ def llm_generate(prompt: str, model="gemini-2.0-flash", retries=3, delay=5) -> s
         raise RuntimeError("Missing GOOGLE_API_KEY or GEMINI_API_KEY.")
     genai.configure(api_key=key)
 
+    # Token limit check
+    estimated_tokens = _estimate_tokens(prompt)
+    if estimated_tokens > MAX_PROMPT_TOKENS:
+        print(f"[WARN] Prompt has ~{estimated_tokens} tokens, truncating to ~{MAX_PROMPT_TOKENS}")
+        prompt = _truncate_text(prompt, MAX_PROMPT_CHARS)
+
     llm = genai.GenerativeModel(model_name=model, system_instruction=SYSTEM_PROMPT)
     for attempt in range(1, retries + 1):
         try:
@@ -170,6 +216,11 @@ def llm_generate(prompt: str, model="gemini-2.0-flash", retries=3, delay=5) -> s
             if "429" in msg and attempt < retries:
                 print(f"[WARN] Rate limited, retrying in {delay}s...")
                 time.sleep(delay)
+                continue
+            # Handle token limit errors
+            if "token" in msg.lower() and "limit" in msg.lower() and attempt < retries:
+                print(f"[WARN] Token limit exceeded, reducing prompt and retrying...")
+                prompt = _truncate_text(prompt, MAX_PROMPT_CHARS // 2)
                 continue
             print(f"[ERROR] Gemini call failed: {e}")
             return f"**LLM generation failed:** {e}"
