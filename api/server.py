@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-FastAPI endpoints for SmartFolio inference and stability inspection.
+FastAPI endpoints for SmartFolio.
 
 Endpoints:
 - POST /inference: run model inference over a date range, return metrics and weight CSV path.
-- POST /stability: compute persistence metrics on a provided weights CSV.
-
-This reuses the existing StockPortfolioEnv and model loading logic. It assumes the
-dataset layout matches dataset_default/data_train_predict_{market}/{horizon}_{relation_type}.
+- POST /finetune: trigger monthly fine-tuning via fine_tune_month.
+- GET  /stream_snapshot: return latest streaming display snapshot (written by gen_data/yf_stream_consumer.py).
 """
 
 from __future__ import annotations
@@ -17,7 +15,6 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import numpy as np
 import pandas as pd
 import torch
 from fastapi import FastAPI, HTTPException
@@ -28,7 +25,6 @@ from stable_baselines3 import PPO
 from dataloader.data_loader import AllGraphDataSampler
 from env.portfolio_env import StockPortfolioEnv
 from trainer.irl_trainer import process_data
-from tools.weights_persistence_viz import load_tickers, rank_frequency, summarize, turnover
 from main import fine_tune_month, get_risk_score_dir
 from utils.ticker_mapping import get_ticker_mapping_for_period
 
@@ -58,14 +54,6 @@ class PortfolioValuePoint(BaseModel):
     step: int
     portfolio_value: Optional[float]
     daily_return: Optional[float]
-
-
-class StabilityRequest(BaseModel):
-    weights_csv: str = Field(..., description="Path to weights CSV saved from inference")
-    tickers_csv: Optional[str] = None
-    top_k: int = 20
-    top_k_overlap: int = 20
-
 
 class FinetuneRequest(BaseModel):
     manifest_path: Optional[str] = Field(
@@ -111,35 +99,6 @@ class FinetuneRequest(BaseModel):
         None,
         description="Pathway streaming flag (matches positional 'stream' arg in main.py)",
     )
-
-    # model_config = {
-    #     "json_schema_extra": {
-    #         "examples": [
-    #             {
-    #                 "manifest_path": "dataset_default/data_train_predict_custom/1_hy/monthly_manifest.json",
-    #                 "save_dir": "./checkpoints",
-    #                 "device": "cpu",
-    #                 "run_monthly_fine_tune": True,
-    #                 "market": "custom",
-    #                 "horizon": "1",
-    #                 "relation_type": "hy",
-    #                 "fine_tune_steps": 1,
-    #                 "baseline_checkpoint": "checkpoints/baseline(1).zip",
-    #                 "resume_model_path": "checkpoints/baseline(1).zip",
-    #                 "reward_net_path": "checkpoints/reward_net_custom_20251202_164846.pt",
-    #                 "batch_size": 16,
-    #                 "n_steps": 2048,
-    #                 "num_stocks": 97,
-    #                 "ptr_mode": True,
-    #                 "ptr_coef": 0.1,
-    #                 "ptr_memory_size": 1000,
-    #                 "ptr_priority_type": "max",
-    #                 "promotion_min_sharpe": 0.5,
-    #                 "promotion_max_drawdown": 0.2,
-    #             }
-    #         ]
-    #     }
-    # }
 
 
 def _dataset_dir(req: InferenceRequest) -> Path:
@@ -364,74 +323,6 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
     }
 
 
-
-def _stability_metrics(req: StabilityRequest) -> Dict[str, Any]:
-    weights_path = Path(req.weights_csv).expanduser()
-    if not weights_path.exists():
-        raise FileNotFoundError(f"Weights CSV not found: {weights_path}")
-    df = pd.read_csv(weights_path)
-    tickers = load_tickers(req.tickers_csv, expected_count=df["ticker"].nunique() if "ticker" in df else None)
-    summarize(df, req.top_k, tickers)
-
-    rf = rank_frequency(df, req.top_k)
-    rf_path = weights_path.with_name(weights_path.stem + "_rank_frequency.csv")
-    if not rf.empty:
-        rf.to_csv(rf_path, index_label="rank")
-
-    steps = sorted(df["step"].unique())
-    tickers_list = tickers if tickers else sorted(df["ticker"].unique())
-    matrix = np.zeros((len(steps), len(tickers_list)), dtype=np.float32)
-    ticker_to_idx = {t: i for i, t in enumerate(tickers_list)}
-    step_to_idx = {s: i for i, s in enumerate(steps)}
-    for _, row in df.iterrows():
-        ti = ticker_to_idx.get(row["ticker"], None)
-        si = step_to_idx.get(row["step"], None)
-        if ti is None or si is None:
-            continue
-        matrix[si, ti] = row["weight"]
-
-    to = turnover(matrix)
-    cos = None
-    overlaps = None
-    if matrix.shape[0] >= 2:
-        norms = np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-8
-        normed = matrix / norms
-        cos = (normed[1:] * normed[:-1]).sum(axis=1)
-        k = min(req.top_k_overlap, matrix.shape[1])
-        overlaps_list = []
-        for i in range(matrix.shape[0] - 1):
-            top_t = set(np.argsort(-matrix[i])[:k])
-            top_prev = set(np.argsort(-matrix[i + 1])[:k])
-            inter = len(top_t & top_prev)
-            union = len(top_t | top_prev)
-            overlaps_list.append(inter / union if union > 0 else 0.0)
-        overlaps = np.array(overlaps_list)
-
-    return {
-        "rank_frequency_csv": str(rf_path) if rf is not None else None,
-        "turnover": {
-            "mean": float(to.mean()) if to.size else None,
-            "std": float(to.std()) if to.size else None,
-            "min": float(to.min()) if to.size else None,
-            "max": float(to.max()) if to.size else None,
-        },
-        "cosine": {
-            "mean": float(cos.mean()) if cos is not None else None,
-            "std": float(cos.std()) if cos is not None else None,
-            "min": float(cos.min()) if cos is not None else None,
-            "max": float(cos.max()) if cos is not None else None,
-        },
-        "top_k_overlap": {
-            "k": int(min(req.top_k_overlap, matrix.shape[1])) if matrix.size else None,
-            "mean": float(overlaps.mean()) if overlaps is not None else None,
-            "std": float(overlaps.std()) if overlaps is not None else None,
-            "min": float(overlaps.min()) if overlaps is not None else None,
-            "max": float(overlaps.max()) if overlaps is not None else None,
-        },
-        "weights_csv": str(weights_path),
-    }
-
-
 app = FastAPI(title="SmartFolio API", version="0.1.0")
 
 
@@ -442,16 +333,6 @@ def inference(req: InferenceRequest):
         return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/stability")
-def stability(req: StabilityRequest):
-    try:
-        result = _stability_metrics(req)
-        return result
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
 
 @app.post("/finetune")
 def finetune(req: FinetuneRequest):
@@ -561,6 +442,29 @@ def finetune(req: FinetuneRequest):
             "checkpoint": checkpoint,
             "replay_buffer_size": len(replay_buffer),
             "new_samples_added": len(new_samples) if new_samples else 0,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/stream_snapshot")
+def stream_snapshot(path: str = "display_data/stream_snapshot.parquet", limit: int = 200):
+    """
+    Return the latest streaming display snapshot produced by gen_data/yf_stream_consumer.py.
+    """
+    snapshot_path = Path(path).expanduser()
+    if not snapshot_path.exists():
+        raise HTTPException(status_code=404, detail=f"Snapshot not found: {snapshot_path}")
+    try:
+        df = pd.read_parquet(snapshot_path)
+        if "dt" in df.columns:
+            df = df.sort_values("dt")
+        if limit and limit > 0:
+            df = df.tail(limit)
+        return {
+            "path": str(snapshot_path),
+            "rows": len(df),
+            "data": df.to_dict(orient="records"),
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

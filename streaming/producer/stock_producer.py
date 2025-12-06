@@ -9,6 +9,7 @@ import json
 import time
 import logging
 from pathlib import Path
+import yfinance as yf
 from typing import Optional
 from datetime import datetime
 from kafka import KafkaProducer

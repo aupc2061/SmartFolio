@@ -40,6 +40,7 @@ def get_sector_map(tickers, market="custom"):
     for t in tqdm(tickers):
         try:
             info = yf.Ticker(t).info
+            industry_map[t] = info.get("industry", "Unknown")
             sector_map[t] = info.get("sector", "Unknown")
         except:
             sector_map[t] = "Unknown"
@@ -148,8 +149,8 @@ def main():
     df_final["dt"] = df_final["dt"].dt.strftime("%Y-%m-%d")
     
     df_final.dropna().to_csv(out_path, index=False)
-    print(f"✅ Generated Display Data: {out_path}")
-    print(f"   Features included: {len(final_cols)}")
+    print(f"Generated Display Data: {out_path}")
+    print(f"Features included: {len(final_cols)}")
 
 if __name__ == "__main__":
     main()

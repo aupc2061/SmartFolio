@@ -165,6 +165,11 @@ class StockPortfolioEnv(gym.Env):
                         f"MDD: {benchmark_metrics.get('mdd'):.4f} | "
                         f"CR: {benchmark_metrics.get('cr'):.4f}"
                     )
+                action_scores = np.array(actions).flatten()
+                temp = max(self.action_temperature, 1e-4)
+                exp_actions = np.exp((action_scores - np.max(action_scores)) / temp)
+                weights = exp_actions / exp_actions.sum()
+                print(f"Non-zero allocations: {(weights > 0.01).sum()}/{len(weights)}")
                 print("=================================")
         else:
             self.current_step += 1

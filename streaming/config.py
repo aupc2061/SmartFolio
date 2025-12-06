@@ -93,6 +93,7 @@ DEBUG_DIR = OUTPUT_DIR / "debug"
 # =============================================================================
 # Stock Kafka Broker (for stock/OHLCV data)
 KAFKA_BROKER_STOCK = os.getenv("KAFKA_BROKER_STOCK", "localhost:9092")
+KAFKA_BROKER_STOCK_1 = "localhost:9094"
 # User Kafka Broker (for user data)
 KAFKA_BROKER_USER = os.getenv("KAFKA_BROKER_USER", "localhost:9093")
 
@@ -104,6 +105,7 @@ KAFKA_GROUP_ID_USER = os.getenv("KAFKA_GROUP_USER", "user-consumer-group")
 
 # Kafka Topics
 STOCK_DATA_TOPIC = os.getenv("STOCK_TOPIC", "stock_stream")
+STOCK_DATA_TOPIC_1 = "yf_stream"
 USER_DATA_TOPIC = os.getenv("USER_TOPIC", "user_stream")
 PROCESSED_USER_TOPIC = "processed_user_data"
 

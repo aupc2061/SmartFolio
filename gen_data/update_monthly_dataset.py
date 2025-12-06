@@ -343,7 +343,7 @@ def fetch_latest_month_data(
     if df_raw.empty:
         raise ValueError("No data returned from yfinance")
     
-    # Process data (same as build_dataset_yf.py)
+    # Process data
     # NOTE: get_label() drops last `horizon` dates (no forward return)
     df_lbl = get_label(df_raw, horizon=horizon)
     df_roll = cal_rolling_mean_std(df_lbl, cal_cols=["close", "volume"], lookback=5, use_pathway=False)
