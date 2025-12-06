@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FastAPI endpoints for SmartFolio.
+FastAPI endpoints for Falcon.
 
 Endpoints:
 - POST /inference: run model inference over a date range, return metrics and weight CSV path.
@@ -321,7 +321,7 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
     }
 
 
-app = FastAPI(title="SmartFolio API", version="0.1.0")
+app = FastAPI(title="Falcon API", version="0.1.0")
 
 
 @app.post("/inference")
