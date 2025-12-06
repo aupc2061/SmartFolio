@@ -17,39 +17,54 @@ TREND_LOOKBACK_DAYS = 21
 
 def get_sector_map(tickers, market="custom"):
     """
-    Fetch sector info only if not already cached.
-    Saves to dataset/sector_map.csv to avoid repeated API calls.
+    Fetch sector and industry info (cached in dataset_default/sector_map.csv).
+    Returns (sector_map, industry_map).
     """
     cache_path = os.path.join(DATASET_ROOT, "sector_map.csv")
     
     # 1. Try to load from cache
     if os.path.exists(cache_path):
-        print(f"Loading cached sector map from {cache_path}...")
+        print(f"Loading cached sector/industry map from {cache_path}...")
         try:
-            return pd.read_csv(cache_path).set_index("ticker")["sector"].to_dict()
+            cached = pd.read_csv(cache_path)
+            sector_map = cached.set_index("ticker")["sector"].to_dict()
+            industry_map = (
+                cached.set_index("ticker")["industry"].to_dict()
+                if "industry" in cached.columns
+                else {t: "Unknown" for t in tickers}
+            )
+            return sector_map, industry_map
         except Exception:
             print("Cache corrupt, refetching...")
 
     # 2. Fetch from Yahoo Finance
     if yf is None:
-        print("Warning: yfinance not installed. Sectors will be 'Unknown'.")
-        return {t: "Unknown" for t in tickers}
+        print("Warning: yfinance not installed. Sectors/industries will be 'Unknown'.")
+        return ({t: "Unknown" for t in tickers}, {t: "Unknown" for t in tickers})
 
-    print(f"Fetching fresh sector data for {len(tickers)} tickers...")
+    print(f"Fetching fresh sector/industry data for {len(tickers)} tickers...")
     sector_map = {}
+    industry_map = {}
     for t in tqdm(tickers):
         try:
             info = yf.Ticker(t).info
             industry_map[t] = info.get("industry", "Unknown")
             sector_map[t] = info.get("sector", "Unknown")
-        except:
+        except Exception:
             sector_map[t] = "Unknown"
+            industry_map[t] = "Unknown"
     
     # 3. Save to cache
     os.makedirs(DATASET_ROOT, exist_ok=True)
-    pd.DataFrame(list(sector_map.items()), columns=["ticker", "sector"]).to_csv(cache_path, index=False)
-    print(f"Saved sector map to {cache_path}")
-    return sector_map
+    pd.DataFrame(
+        {
+            "ticker": list(sector_map.keys()),
+            "sector": list(sector_map.values()),
+            "industry": [industry_map.get(t, "Unknown") for t in sector_map.keys()],
+        }
+    ).to_csv(cache_path, index=False)
+    print(f"Saved sector/industry map to {cache_path}")
+    return sector_map, industry_map
 
 def _trend_over_window(window: np.ndarray) -> float:
     if len(window) == 0: return np.nan
@@ -118,8 +133,9 @@ def main():
 
     # 2. Add Sectors (Fetch once, reuse forever)
     tickers = df["kdcode"].unique().tolist()
-    sector_map = get_sector_map(tickers, args.market)
+    sector_map, industry_map = get_sector_map(tickers, args.market)
     df["sector"] = df["kdcode"].map(sector_map).fillna("Unknown")
+    df["industry"] = df["kdcode"].map(industry_map).fillna("Unknown")
 
     # 3. Re-Engineer Features (Daily Change, Trends)
     # We re-run this to guarantee they exist even if org_csv was raw
@@ -135,7 +151,7 @@ def main():
     # Final Columns for Frontend
     # Preserving all original features + adding new ones
     target_cols = [
-        "dt", "kdcode", "sector", 
+        "dt", "kdcode", "sector", "industry",
         "close", "open", "high", "low", "prev_close", "volume", 
         "daily_change", "trend_1m", 
         "volatility", "sector_volatility", "risk_label"

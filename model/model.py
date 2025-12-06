@@ -55,7 +55,6 @@ class MHGraphAttn(Module):
         logits = f_1 + f_2
         weight = self.leaky_relu(logits) 
         
-        # 3. [FIX] Strict Masking
         # We need to broadcast adj_mat to [Batch, Heads, N, N]
         # adj_mat is [Batch, N, N] -> unsqueeze head dim -> [Batch, 1, N, N]
         mask = adj_mat.unsqueeze(1)

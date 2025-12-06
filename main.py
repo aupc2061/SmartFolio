@@ -236,7 +236,7 @@ def select_replay_samples(model, env, dataset, k_percent=0.3):
     print(f"Selected {len(selected_samples)} replay samples from {len(dataset)} total.")
     return selected_samples
 
-def fine_tune_month(args, bookkeeping_path=None, replay_buffer=None, fetch_new_data=True, stream=None):
+def fine_tune_month(args, bookkeeping_path=None, replay_buffer=None, fetch_new_data=False, stream=None, finetune_month=None):
     """
     Fine-tune the PPO model on the latest month derived from pkl files in the data directory.
     
@@ -245,7 +245,7 @@ def fine_tune_month(args, bookkeeping_path=None, replay_buffer=None, fetch_new_d
     2. Scan pkl files in data_dir (named like 2024-11-29.pkl)
     3. Parse dates from filenames
     4. Group by month (YYYY-MM)
-    5. Find the latest month with data
+    5. Find the latest month with data (or use finetune_month if provided)
     6. Fine-tune on that month's data
     
     Args:
@@ -254,6 +254,7 @@ def fine_tune_month(args, bookkeeping_path=None, replay_buffer=None, fetch_new_d
         replay_buffer: Optional list of replay samples from previous training
         fetch_new_data: If True, fetch latest month from yfinance before fine-tuning
         stream: Flag for using pathway streaming
+        finetune_month: Optional month label (YYYY-MM) to use for finetuning instead of auto-detecting latest
     """
     # Data directory containing daily pkl files
     base_dir = f'dataset_default/data_train_predict_{args.market}/{args.horizon}_{args.relation_type}/'
@@ -306,7 +307,17 @@ def fine_tune_month(args, bookkeeping_path=None, replay_buffer=None, fetch_new_d
     if not month_labels:
         raise ValueError("No months could be derived from pkl filenames.")
 
-    latest_month = month_labels[-1]
+    # Use finetune_month if provided, otherwise use latest month
+    # Also check args.finetune_month as fallback
+    target_month = finetune_month or getattr(args, "finetune_month", None)
+    if target_month:
+        if target_month not in month_labels:
+            raise ValueError(f"Specified finetune_month '{target_month}' not found in available months: {month_labels}")
+        latest_month = target_month
+        print(f"Using specified finetune_month: {latest_month}")
+    else:
+        latest_month = month_labels[-1]
+        print(f"Auto-detected latest month: {latest_month}")
 
     # Training month = t-7 (if available), else earliest
     train_month_idx = max(0, len(month_labels) - 8)
@@ -344,8 +355,8 @@ def fine_tune_month(args, bookkeeping_path=None, replay_buffer=None, fetch_new_d
     eval_dataset = AllGraphDataSampler(
         base_dir=base_dir,
         date=True,
-        train_start_date=eval_start,
-        train_end_date=eval_end,
+        test_start_date=eval_start,
+        test_end_date=eval_end,
         mode="test",
     )
 
@@ -629,6 +640,8 @@ if __name__ == '__main__':
     
     parser.add_argument("--run_monthly_fine_tune", action="store_true",
                         help="Run monthly fine-tuning")
+    parser.add_argument("--finetune_month", default=None,
+                        help="Optional month label (YYYY-MM) to finetune on; if not provided, uses latest available month")
     parser.add_argument("--discover_months_with_pathway", action="store_true",
                         help="group daily pickle files into monthly windows using Pathway")
     parser.add_argument("--month_cutoff_days", type=int, default=None,
@@ -788,7 +801,12 @@ if __name__ == '__main__':
                 print(f"Using baseline checkpoint as resume path: {args.resume_model_path}")
         
         # Call fine_tune_month once (fetches latest month and fine-tunes)
-        checkpoint, new_samples = fine_tune_month(args, replay_buffer=replay_buffer)
+        # Pass finetune_month if specified via CLI
+        checkpoint, new_samples = fine_tune_month(
+            args, 
+            replay_buffer=replay_buffer,
+            finetune_month=getattr(args, "finetune_month", None)
+        )
         print(f"Monthly fine-tuning complete. Checkpoint: {checkpoint}")
         
         # Update replay buffer with new samples

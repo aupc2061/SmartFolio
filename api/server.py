@@ -35,6 +35,7 @@ import sys
 class InferenceRequest(BaseModel):
     model_path: str = Field(..., description="Path to PPO checkpoint (.zip)")
     market: str = "custom"
+    save_dir: str = "./checkpoints"
     horizon: str = "1"
     relation_type: str = "hy"
     test_start_date: str = Field(..., description="YYYY-MM-DD")
@@ -56,10 +57,6 @@ class PortfolioValuePoint(BaseModel):
     daily_return: Optional[float]
 
 class FinetuneRequest(BaseModel):
-    manifest_path: Optional[str] = Field(
-        None,
-        description="Deprecated manifest path; kept for compatibility, not required.",
-    )
     save_dir: str = Field("./checkpoints", description="Base checkpoint directory (risk suffix is added automatically)")
     device: str = Field("cpu", description="Matches -device/--device")
     run_monthly_fine_tune: bool = Field(True, description="Set when using --run_monthly_fine_tune")
@@ -76,10 +73,6 @@ class FinetuneRequest(BaseModel):
     resume_model_path: Optional[str] = Field(
         None,
         description="Optional override for --resume_model_path; defaults to baseline in risk-scored directory",
-    )
-    reward_net_path: Optional[str] = Field(
-        None,
-        description="Optional path for IRL reward net; leave null to skip",
     )
     batch_size: int = Field(16, description="Matches --batch_size")
     n_steps: int = Field(2048, description="Matches --n_steps")
@@ -98,6 +91,10 @@ class FinetuneRequest(BaseModel):
     stream: Optional[str] = Field(
         None,
         description="Pathway streaming flag (matches positional 'stream' arg in main.py)",
+    )
+    finetune_month: Optional[str] = Field(
+        None,
+        description="Optional month label (YYYY-MM) to finetune on; if not provided, uses latest available month",
     )
 
 
@@ -136,7 +133,7 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
         base_dir="dataset_default"
     )
     date_keys = list(ticker_map.keys()) if ticker_map else []
-
+    req.model_path = get_risk_score_dir(req.save_dir, req.risk_score) + "/" + "baseline.zip"
     model_path = Path(req.model_path).expanduser()
     if not model_path.exists():
         raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
@@ -193,6 +190,7 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
         df_benchmark = df_benchmark[(df_benchmark['datetime'] >= req.test_start_date) &
                                     (df_benchmark['datetime'] <= req.test_end_date)]
         benchmark_return = df_benchmark['daily_return']
+        print(f"[SERVER] Benchmark data loaded with {len(benchmark_return)} entries", flush=True)
         env_test = StockPortfolioEnv(
             args=args_stub,
             corr=corr,
@@ -358,7 +356,9 @@ def finetune(req: FinetuneRequest):
 
         # Load replay buffer if available (same as main.py)
         replay_buffer = []
-        save_dir_risk = get_risk_score_dir(req.save_dir, req.risk_score)
+        # Treat empty save_dir as default "./checkpoints"
+        save_dir_base = req.save_dir if req.save_dir else "./checkpoints"
+        save_dir_risk = get_risk_score_dir(save_dir_base, req.risk_score)
         buffer_path = os.path.join(save_dir_risk, f"replay_buffer_{req.market}.pkl")
         if os.path.exists(buffer_path):
             with open(buffer_path, "rb") as f:
@@ -367,10 +367,7 @@ def finetune(req: FinetuneRequest):
 
         # Resolve checkpoint paths with risk-scored directory fallback
         baseline_ckpt = req.baseline_checkpoint or os.path.join(save_dir_risk, "baseline.zip")
-        resume_ckpt = req.resume_model_path or baseline_ckpt
-        reward_net_path = req.reward_net_path
-        if reward_net_path is not None:
-            reward_net_path = os.path.expanduser(reward_net_path)
+        resume_ckpt = baseline_ckpt
         os.makedirs(save_dir_risk, exist_ok=True)
 
         args = argparse.Namespace(
@@ -390,7 +387,6 @@ def finetune(req: FinetuneRequest):
             tickers_file="tickers.csv",
             multi_reward_yn=True,
             resume_model_path=resume_ckpt,
-            reward_net_path=reward_net_path,
             fine_tune_steps=req.fine_tune_steps,
             save_dir=save_dir_risk,
             baseline_checkpoint=baseline_ckpt,
@@ -416,14 +412,15 @@ def finetune(req: FinetuneRequest):
             lookback=30,
             finrag_prior=None,
             finrag_weights_path=None,
-            manifest=req.manifest_path,
             ptr_mode=req.ptr_mode,
             risk_score=req.risk_score,
-            stream=req.stream,
+            stream=req.stream if req.stream else None,  # Treat empty string as None
         )
         
         # Call fine_tune_month (returns checkpoint path AND new replay samples)
-        checkpoint, new_samples = fine_tune_month(args, manifest_path=req.manifest_path, replay_buffer=replay_buffer)
+        # Treat empty string finetune_month as None
+        finetune_month = req.finetune_month if req.finetune_month else None
+        checkpoint, new_samples = fine_tune_month(args, replay_buffer=replay_buffer, finetune_month=finetune_month)
         
         # Update replay buffer with new samples (same as main.py)
         if new_samples:
