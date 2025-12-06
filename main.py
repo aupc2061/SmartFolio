@@ -705,7 +705,7 @@ if __name__ == '__main__':
         print("TensorBoard logging disabled (--disable-tensorboard); PPO will not attempt to import tensorboard.")
 
     args.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    args.model_name = 'SmartFolio'
+    args.model_name = 'Falcon'
     args.relation_type = getattr(args, "relation_type", "hy") or "hy"
     args.seed = 123
 

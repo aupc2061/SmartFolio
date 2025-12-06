@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 
 from fastmcp import Client
+import os
+os.environ['OPENAI_API_KEY'] = "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"
 
 BASE_DIR = Path(__file__).resolve().parent
 
