@@ -290,6 +290,25 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
                 (final_tickers[i] if i < len(final_tickers) else f"stock_{i}"): float(w)
                 for i, w in enumerate(weights_array[final_step_idx])
             }
+            
+            # Also create final_weights from all_weights_data to ensure we have actual ticker names
+            # Extract final step data from all_weights_data (which has actual ticker names)
+            final_step_weights_from_data = {}
+            if all_weights_data:
+                # Find the maximum step value to get the final step
+                max_step = max((w.get("step", 0) for w in all_weights_data), default=0)
+                # Get all weights for the final step
+                for w in all_weights_data:
+                    if w.get("step") == max_step and w.get("weight", 0) > 0.0001:
+                        ticker = w.get("ticker", "")
+                        if ticker and not ticker.startswith("stock_"):  # Prefer actual ticker names
+                            final_step_weights_from_data[ticker] = w.get("weight", 0)
+                        elif ticker:  # Fallback to stock_X if no actual ticker
+                            final_step_weights_from_data[ticker] = w.get("weight", 0)
+            
+            # Use final_step_weights_from_data if it has actual ticker names, otherwise use final_weights_map
+            if final_step_weights_from_data and any(not k.startswith("stock_") for k in final_step_weights_from_data.keys()):
+                final_weights_map = final_step_weights_from_data
 
     out_dir = Path(req.output_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -320,6 +339,7 @@ def _run_inference(req: InferenceRequest) -> Dict[str, Any]:
         "peak_value": peak_value,
         "current_value": current_value,
         "final_weights": final_weights_map if final_weights_map else None,
+        "all_weights_data": all_weights_data if all_weights_data else None,  # Include for ticker name extraction
     }
 
 

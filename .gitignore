@@ -24,6 +24,8 @@ dist/
 *_summary.md
 
 checkpoints/
+checkpoints_risk*/
+**/checkpoints_risk*/
 logs/
 
 .DS_Store
