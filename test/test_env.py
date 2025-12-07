@@ -44,7 +44,7 @@ def test_risk_engine():
     
     print(f"1. AI Output (Raw Logits): {raw_actions}")
     
-    # --- TEST 1: AGGRESSIVE USER (Risk 0.9, No Cap) ---
+    # TEST 1: AGGRESSIVE USER (Risk 0.9, No Cap)
     print("\n2. Processing for Aggressive User (Risk=0.9)...")
     env_agg = setup_dummy_env(risk_score=0.9, num_stocks=num_stocks)
     
@@ -58,7 +58,7 @@ def test_risk_engine():
     weights_agg = env_agg._apply_risk_constraints(weights_agg)
     print(f"   -> Final Weight (Stock 0): {weights_agg[0]*100:.1f}%")
 
-    # --- TEST 2: CONSERVATIVE USER (Risk 0.1, Cap 20%) ---
+    # TEST 2: CONSERVATIVE USER (Risk 0.1, Cap 20%)
     print("\n3. Processing for Conservative User (Risk=0.1, Cap=20%)...")
     # FIX: We give the conservative user a Hard Cap of 0.20
     env_con = setup_dummy_env(risk_score=0.1, num_stocks=num_stocks, max_cap=0.20)
@@ -74,13 +74,13 @@ def test_risk_engine():
     weights_con = env_con._apply_risk_constraints(weights_con)
     print(f"   -> Final Weight (Stock 0): {weights_con[0]*100:.1f}% (Capped)")
 
-    # --- VERIFICATION ---
+    # VERIFICATION
     if weights_agg[0] > 0.9 and weights_con[0] <= 0.21: # Allow small float error
-        print("\n✅ PASS: The Risk Engine correctly filtered the actions.")
+        print("\n PASS: The Risk Engine correctly filtered the actions.")
         print("   Aggressive: Allowed Concentration.")
         print("   Conservative: Enforced Diversification via Hard Caps.")
     else:
-        print("\n❌ FAIL: Risk Engine logic failed.")
+        print("\n FAIL: Risk Engine logic failed.")
 
     # 4. Visualization
     plt.figure(figsize=(8, 5))
