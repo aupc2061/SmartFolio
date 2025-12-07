@@ -8,14 +8,14 @@ from scipy.sparse import csr_matrix
 import glob
 
 def analyze_topology(market='custom'):
-    print(f"--- Analyzing Graph Topology for Market: {market} ---")
+    print(f"Analyzing Graph Topology for Market: {market}")
     
     # 1. Find Correlation Files
     corr_dir = os.path.join("dataset", "corr", market)
     files = sorted(glob.glob(os.path.join(corr_dir, "*.csv")))
     
     if not files:
-        print(f"❌ No correlation files found in {corr_dir}. Run build_dataset_yf.py first.")
+        print(f"No correlation files found in {corr_dir}. Run build_dataset_yf.py first.")
         return
 
     print(f"Found {len(files)} monthly correlation matrices.")
@@ -63,7 +63,7 @@ def analyze_topology(market='custom'):
 
     print("\nData processing complete. Generating plots...")
 
-    # --- PLOTTING ---
+    # PLOTTING 
     sns.set_theme(style="whitegrid")
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     
@@ -105,7 +105,7 @@ def analyze_topology(market='custom'):
     
     out_path = "test/chart_topology_sensitivity_linear.png"
     plt.savefig(out_path)
-    print(f"\n✅ Topology Linear Analysis Saved: {out_path}")
+    print(f"\nTopology Linear Analysis Saved: {out_path}")
     
     # Print the table for reference
     print("\n--- Summary Data ---")
