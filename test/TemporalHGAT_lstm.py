@@ -51,7 +51,7 @@ def generate_trend_data(num_stocks, lookback, input_dim):
     return ts_data
 
 def test_lstm_brain():
-    print("--- 🧠 Testing Brain Component 1: LSTM (Temporal Encoder) ---")
+    print("Testing Brain Component 1: LSTM (Temporal Encoder)")
     
     # Settings
     N = 12  # 12 Stocks (4 Up, 4 Down, 4 Noise)
@@ -105,7 +105,7 @@ def test_lstm_brain():
     
     plt.tight_layout()
     plt.savefig("test/brain_1_lstm_only.png")
-    print("✅ Test Complete. Results saved to: test/brain_1_lstm_only.png")
+    print("Test Complete. Results saved to: test/brain_1_lstm_only.png")
 
 if __name__ == "__main__":
     test_lstm_brain()
