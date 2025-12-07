@@ -39,7 +39,7 @@ def generate_trend_data(num_stocks, lookback, input_dim):
     return ts_data
 
 def visualize_dynamics():
-    print("--- 🎬 Visualizing LSTM Thinking Dynamics (Time Evolution) ---")
+    print("Visualizing LSTM Thinking Dynamics (Time Evolution)")
     
     N = 12
     L = 30
@@ -103,7 +103,7 @@ def visualize_dynamics():
     
     save_path = "test/brain_1_lstm_dynamics.png"
     plt.savefig(save_path)
-    print(f"✅ Dynamics Chart Saved: {save_path}")
+    print(f"Dynamics Chart Saved: {save_path}")
 
 if __name__ == "__main__":
     visualize_dynamics()
