@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Dict
 
 from explainibility_agents import orchestrator_xai as base_orchestrator
@@ -17,12 +18,63 @@ def run_orchestrator_job(cfg: XAIRequest) -> Dict[str, object]:
     if index_path.exists():
         index_payload = json.loads(index_path.read_text(encoding="utf-8"))
 
-    final_md = cfg.output_dir / "explainability_final_results.md"
+    # Read markdown and JSON content instead of storing paths
+    final_md_path = cfg.output_dir / "explainability_final_results.md"
+    final_md_content = None
+    if final_md_path.exists():
+        final_md_content = final_md_path.read_text(encoding="utf-8")
+
+    final_json_path = cfg.output_dir / "explainability_final_results.json"
+    final_json_content = None
+    if final_json_path.exists():
+        try:
+            final_json_content = json.loads(final_json_path.read_text(encoding="utf-8"))
+        except:
+            final_json_content = None
+
+    # Read individual stock markdown files
+    stock_reports = []
+    if index_payload and "trading_agents" in index_payload:
+        for trading_agent in index_payload.get("trading_agents", []):
+            ticker = trading_agent.get("ticker")
+            output_path = trading_agent.get("output_path")
+            if ticker and output_path:
+                # Try to read from the output_path (which might be a full path or relative)
+                stock_md_path = Path(output_path)
+                if not stock_md_path.exists():
+                    # Try relative to output_dir
+                    stock_md_path = cfg.output_dir / f"{ticker}_summary.md"
+                
+                if stock_md_path.exists():
+                    try:
+                        stock_md_content = stock_md_path.read_text(encoding="utf-8")
+                        stock_reports.append({
+                            "ticker": ticker,
+                            "markdown": stock_md_content,
+                            "weight": trading_agent.get("weight"),
+                            "as_of": trading_agent.get("as_of"),
+                            "summary_points": trading_agent.get("summary_points", []),
+                            "llm_used": trading_agent.get("llm_used", False),
+                            "success": trading_agent.get("success", False)
+                        })
+                    except Exception as e:
+                        # If file read fails, still store the report without markdown
+                        stock_reports.append({
+                            "ticker": ticker,
+                            "markdown": None,
+                            "weight": trading_agent.get("weight"),
+                            "as_of": trading_agent.get("as_of"),
+                            "summary_points": trading_agent.get("summary_points", []),
+                            "llm_used": trading_agent.get("llm_used", False),
+                            "success": trading_agent.get("success", False),
+                            "error": f"Could not read markdown: {str(e)}"
+                        })
 
     return {
-        "index_path": str(index_path) if index_path.exists() else None,
-        "final_markdown": str(final_md) if final_md.exists() else None,
         "index": index_payload,
+        "final_markdown": final_md_content,
+        "final_json": final_json_content,
+        "stock_reports": stock_reports,
     }
 
 

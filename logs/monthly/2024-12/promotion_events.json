@@ -12,5 +12,19 @@
     "mdd": -0.09896751074331966,
     "cr": 2.768231318331013,
     "ir": 0.04247695253429649
+  },
+  {
+    "created_at": "2025-12-04T10:52:06.238469",
+    "promoted": true,
+    "reasons": [],
+    "candidate_path": "./checkpoints_risk05/ppo_hgat_custom_20251204_105206.zip",
+    "baseline_path": "./checkpoints_risk05/baseline.zip",
+    "count": 1,
+    "arr": 0.2796167294695153,
+    "avol": 0.1509560939807624,
+    "sharpe": 1.634125891456272,
+    "mdd": -0.10775901486523365,
+    "cr": 2.5948337577065974,
+    "ir": 0.5474194134820982
   }
 ]

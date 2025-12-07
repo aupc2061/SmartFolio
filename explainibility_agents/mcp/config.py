@@ -71,13 +71,16 @@ class XAIRequest:
     def to_orchestrator_config(self):  # lazy import to avoid circular refs
         from explainibility_agents.orchestrator_xai import OrchestratorConfig
 
+        # Ensure top_k is properly converted - handle None case
+        top_k_value = int(self.top_k) if self.top_k is not None else None
+        
         return OrchestratorConfig(
             date=self.date,
             monthly_log_csv=Path(self.monthly_log_csv),
             model_path=self.model_path,
             market=self.market,
             data_root=self.data_root,
-            top_k=int(self.top_k),
+            top_k=top_k_value,
             lookback_days=int(self.lookback_days),
             llm=bool(self.llm),
             llm_model=self.llm_model,

@@ -148,11 +148,12 @@ class SmartFolioMCPServer:
                 # Attach docstring for description
                 request_handler.__doc__ = self.tool_def.description
 
-                # Register
+                # Register - Pathway's McpServer.tool() expects name as first positional arg
+                # and request_handler, schema as keyword-only args (after *)
                 server.tool(
-                    name=self.tool_def.name,
-                    request_handler=request_handler,
-                    schema=self.schema_cls,
+                    self.tool_def.name,  # positional argument
+                    request_handler=request_handler,  # keyword-only (required after *)
+                    schema=self.schema_cls,  # keyword-only (required after *)
                 )
 
         servables = []

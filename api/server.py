@@ -12,8 +12,16 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Add SmartFolio directory to path to ensure local modules are imported first
+# This prevents conflicts with installed packages that have the same name
+smartfolio_dir = Path(__file__).resolve().parent.parent
+if str(smartfolio_dir) not in sys.path:
+    sys.path.insert(0, str(smartfolio_dir))
 
 import pandas as pd
 import torch
@@ -27,9 +35,6 @@ from env.portfolio_env import StockPortfolioEnv
 from trainer.irl_trainer import process_data
 from main import fine_tune_month, get_risk_score_dir
 from utils.ticker_mapping import get_ticker_mapping_for_period
-
-import subprocess
-import sys
 
 
 class InferenceRequest(BaseModel):

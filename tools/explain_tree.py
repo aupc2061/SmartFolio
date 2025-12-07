@@ -364,12 +364,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=123, help="Random seed for environment seeding")
     parser.add_argument("--deterministic", action="store_true", help="Use deterministic policy predictions")
     parser.add_argument("--max-depth", type=int, default=5, help="Maximum depth for decision tree models")
-    parser.add_argument(
-        "--top-k-stocks",
-        type=int,
-        default=0,
-        help="Number of top-weight stocks to explain in detail (0 means all)",
-    )
+    parser.add_argument("--top-k-stocks", type=int, default=5, help="Number of top-weight stocks to explain in detail")
     parser.add_argument("--random-state", type=int, default=42, help="Random state for surrogate models")
     parser.add_argument("--output-dir", default="./explainability_results", help="Directory to store reports and models")
     parser.add_argument("--feature-names", default=None, help="Comma-separated feature labels (optional)")
@@ -539,9 +534,7 @@ def _focus_tickers_from_log(
     if "weight" not in filtered.columns:
         print("[WARN] focus log CSV missing 'weight' column.")
         return []
-    filtered = filtered.sort_values("weight", ascending=False)
-    if top_k and top_k > 0:
-        filtered = filtered.head(top_k)
+    filtered = filtered.sort_values("weight", ascending=False).head(top_k)
     focus_symbols = [str(val).strip().upper() for val in filtered.get("ticker", []) if str(val).strip()]
     return focus_symbols
 
@@ -650,15 +643,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         if idx is None:
             print(f"[WARN] Focus ticker {symbol} not found in dataset mapping; skipping.")
             continue
-        if idx >= args.num_stocks:
-            print(f"[WARN] Ticker {symbol} maps to index {idx}, but dataset only has {args.num_stocks} stocks. Skipping.")
-            continue
         if idx not in focus_indices:
             focus_indices.append(idx)
 
     avg_weights = Y.mean(axis=0)
-    sorted_indices = np.argsort(avg_weights)[::-1].tolist()
-    default_indices = sorted_indices if args.top_k_stocks <= 0 else sorted_indices[: args.top_k_stocks]
+    default_indices = np.argsort(avg_weights)[::-1][: args.top_k_stocks].tolist()
     target_indices = focus_indices if focus_indices else default_indices
 
     per_stock_rules: Dict[int, Dict[str, object]] = {}
